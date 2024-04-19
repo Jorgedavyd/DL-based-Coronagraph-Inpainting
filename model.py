@@ -1,4 +1,4 @@
-from typing import Tuple, Union
+from typing import Tuple, Union, List, Dict, Any
 from partial_conv import PartialConv2d
 from torch import Tensor
 from torch import nn
@@ -23,36 +23,38 @@ class TrainingPhase(nn.Module):
             criterion: InpaintingLoss = InpaintingLoss()
     ):
         super().__init__()
-        self.config = import_config(name_run)
+        self.config: Dict[str,Any] = import_config(name_run)
         #Tensorboard writer
-        self.writer = SummaryWriter(f'{name_run}')
-        self.name = name_run
-        self.criterion = criterion
+        self.writer: SummaryWriter = SummaryWriter(f'{name_run}')
+        self.name: str = name_run
+        self.criterion: InpaintingLoss = criterion
         #History of changes
-        self.train_epoch = []
-        self.val_epoch = []
-        self.lr_epoch = []
+        self.train_epoch: List[List[int]] = []
+        self.val_epoch: List[List[int]] = []
+        self.lr_epoch: List[List[int]] = []
     @torch.no_grad()
-    def batch_metrics(self, metrics: dict, mode: str):
+    def batch_metrics(self, metrics: dict, card: str):
 
-        if mode == 'Training':
+        if card == 'Training' or 'Training' in card.split('/'):
             self.train()
-        elif mode == 'Validation':
+            mode = 'Training'
+        elif card == 'Validation' or 'Validation' in card.split('/'):
             self.eval()
+            mode = 'Validation'
         else:
-            raise ValueError(f'{mode} is not a valid mode: [Validation, Training]')
+            raise ValueError(f'{card} is not a valid card, it should at least have one of these locations: [Validation, Training]')
         
         self.writer.add_scalars(
-            f'{mode}/metrics',
+            f'{card}/metrics',
             metrics,
             self.config['global_step_train'] if mode == 'Training' else self.config['global_step_val']
         )
         self.writer.flush()
 
         if mode == 'Training':
-            self.train_epoch.append(metrics.values())
+            self.train_epoch.append(list(metrics.values()))
         elif mode == 'Validation':
-            self.val_epoch.append(metrics.values())
+            self.val_epoch.append(list(metrics.values()))
     @torch.no_grad()
     def validation_step(
             self,
@@ -76,12 +78,9 @@ class TrainingPhase(nn.Module):
     
     def training_step(
             self, 
-            batch, 
-            lr_sched: torch.optim.lr_scheduler,
-            grad_clip: float = False,
+            batch
     ):
         torch.cuda.empty_cache()
-        metrics = {}
         #Defining the img and mask
         ground_truth, prior_mask = batch
         x = torch.clone(ground_truth)
@@ -90,30 +89,29 @@ class TrainingPhase(nn.Module):
             L_hole, L_valid, L_perceptual, \
                 L_style_out, L_style_comp = self.criterion(x, ground_truth, prior_mask, updated_mask)
             loss = L_hole + L_valid + L_perceptual + L_style_comp + L_style_out
-            metrics.update(
-                {
-                    f'Hole Loss {i}': L_hole.detach().item(),
-                    f'Validation Loss {i}': L_valid.detach().item(),
-                    f'Perceptual loss {i}': L_perceptual.detach().item(),
-                    f'Predicted Style Loss {i}': L_style_out.detach().item(),
-                    f'Diff Based Style Loss {i}': L_style_comp.detach().item(),
-                    f'Overall {i}': loss.detach().item()
+            
+            metrics = {
+                    f'Hole Loss': L_hole.detach().item(),
+                    f'Validation Loss': L_valid.detach().item(),
+                    f'Perceptual loss': L_perceptual.detach().item(),
+                    f'Predicted Style Loss': L_style_out.detach().item(),
+                    f'Diff Based Style Loss': L_style_comp.detach().item(),
+                    f'Overall': loss.detach().item()
                 }
-            )
+        
             prior_mask = updated_mask
-        self.batch_metrics(metrics, 'Training')
-        self.writer.flush()
-
+            self.batch_metrics(metrics, f'Training/Layer_{i}')
+            self.writer.flush()
         #backpropagate
         loss.backward()
         #gradient clipping
-        if grad_clip:
-            nn.utils.clip_grad_value_(self.parameters(), grad_clip)
+        if self.grad_clip:
+            nn.utils.clip_grad_value_(self.parameters(), self.grad_clip)
         #optimizer step
         self.optimizer.step()
         self.optimizer.zero_grad()
         #scheduler step
-        if lr_sched:
+        if self.scheduler:
             lr = get_lr(self.optimizer)
             self.lr_epoch.append(lr)
             self.writer.add_scalars('Training', {'lr': lr}, self.config['global_step_train'])
@@ -125,7 +123,7 @@ class TrainingPhase(nn.Module):
     def end_of_epoch(self) -> None:
         train_metrics = Tensor(self.train_epoch).mean(dim = -1)
         val_metrics = Tensor(self.val_epoch).mean(dim = -1)
-        lr_epoch = Tensor(self.lr_epoch).mean()
+        lr_epoch = Tensor(self.lr_epoch).mean().item()
 
         train_metrics = {
                 f'Hole Loss': train_metrics[0],
@@ -175,7 +173,7 @@ class TrainingPhase(nn.Module):
 
     @torch.no_grad()
     def save_config(self) -> None:
-        os.makedirs(f'{self.name}/models', exists_ok = True)
+        os.makedirs(f'{self.name}/models', exist_ok= True)
         #Model weights
         self.config['optimizer_state_dict'] = self.optimizer.state_dict()
         self.config['scheduler_state_dict'] = self.scheduler.state_dict()
@@ -196,10 +194,13 @@ class TrainingPhase(nn.Module):
             lr_sched: torch.optim.lr_scheduler = None,
             saving_div: int = 5,
             graph: bool = False,
-            sample_input: Tensor = torch.randn(1,1,1,1),
+            sample_input: Tensor = None,
 
     ) -> None:
         torch.cuda.empty_cache()
+        if graph:
+            assert(sample_input is not None), 'If you want to visualize a graph, you must pass through a sample tensor'
+
         if self.config['optimizer_state_dict'] is not None:
             self.optimizer = opt_func(self.parameters(), lr, weight_decay=weight_decay).load_state_dict(self.config['optimizer_state_dict'])
             self.optimizer.param_groups[0]['lr'] = lr
@@ -207,10 +208,10 @@ class TrainingPhase(nn.Module):
             self.optimizer = opt_func(self.parameters(), lr, weight_decay=weight_decay)
         if lr_sched is not None:
             if self.config['scheduler_state_dict'] is not None:
-                self.scheduler = lr_sched(self.optimizer, lr, len(train_loader)).load_state_dict(self.config['scheduler_state_dict'])
+                self.scheduler = lr_sched(self.optimizer, lr, epochs = epochs, steps_per_epoch = len(train_loader)).load_state_dict(self.config['scheduler_state_dict'])
                 self.scheduler.learning_rate = lr
             else:
-                self.scheduler = lr_sched(self.optimizer, lr, len(train_loader))
+                self.scheduler = lr_sched(self.optimizer, lr, epochs = epochs, steps_per_epoch = len(train_loader))
             lr_sched = True
         # Add model to graph
         if graph and sample_input:
@@ -221,19 +222,19 @@ class TrainingPhase(nn.Module):
         self.weight_decay = weight_decay
         self.grad_clip = grad_clip
 
+        #decorating dataloaders
         
         for epoch in range(self.config['epoch'], self.config['epoch'] + epochs):
             #Define epoch
             self.config['epoch'] = epoch
-            # decorating iterable dataloaders
-            train_loader = tqdm(train_loader, desc = f'Training - Epoch: {epoch}')
-            val_loader = tqdm(val_loader, desc = f'Validation - Epoch: {epoch}')
+            #Training loop
             self.train()
-            for train_batch in train_loader:
+            for train_batch in tqdm(train_loader, desc = f'Training - Epoch: {epoch}'):
                 #training step
-                self.training_step(train_batch, lr_sched, grad_clip)
+                self.training_step(train_batch)
+            #Validation loop
             self.eval()
-            for val_batch in val_loader:
+            for val_batch in tqdm(val_loader, desc = f'Validation - Epoch: {epoch}'):
                 self.validation_step(val_batch)
             #Save model and config if epoch mod(saving_div) = 0
             if epoch % saving_div == 0:
