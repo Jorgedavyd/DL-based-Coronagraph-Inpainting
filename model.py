@@ -1,4 +1,4 @@
-from typing import Tuple, Union, List, Dict, Any
+from typing import Tuple, Union, List, Dict, Any, Callable
 from partial_conv import PartialConv2d
 from torch import Tensor
 from torch import nn
@@ -21,7 +21,7 @@ class TrainingPhase(nn.Module):
             self,
             name_run: str,
             criterion: InpaintingLoss = InpaintingLoss()
-    ):
+    ) -> None:
         super().__init__()
         self.config: Dict[str,Any] = import_config(name_run)
         #Tensorboard writer
@@ -33,7 +33,7 @@ class TrainingPhase(nn.Module):
         self.val_epoch: List[List[int]] = []
         self.lr_epoch: List[List[int]] = []
     @torch.no_grad()
-    def batch_metrics(self, metrics: dict, card: str):
+    def batch_metrics(self, metrics: dict, card: str) -> None:
 
         if card == 'Training' or 'Training' in card.split('/'):
             self.train()
@@ -59,19 +59,16 @@ class TrainingPhase(nn.Module):
     def validation_step(
             self,
             batch
-    ):
+    ) -> None:
         img, prior_mask = batch
         x = torch.clone(img)
         x, updated_mask = self(x, prior_mask)
-        L_hole, L_valid, L_perceptual, \
-                L_style_out, L_style_comp = self.criterion(x, img, prior_mask, updated_mask)
+        L_pixel, L_perceptual, L_style = self.criterion(x, img, prior_mask, updated_mask)
         metrics = {
-                    f'Hole Loss': L_hole.item(),
-                    f'Validation Loss': L_valid.item(),
+                    f'Pixel-wise Loss': L_pixel.item(),
                     f'Perceptual loss': L_perceptual.item(),
-                    f'Predicted Style Loss': L_style_out.item(),
-                    f'Diff Based Style Loss': L_style_comp.item(),
-                    f'Overall': (L_hole + L_valid + L_perceptual + L_style_comp + L_style_out).item()
+                    f'Style Loss': L_style.item(),
+                    f'Overall': (L_pixel + L_perceptual + L_style).item()
                 }
         self.batch_metrics(metrics, 'Validation')
         self.config['global_step_val'] += 1
@@ -79,29 +76,28 @@ class TrainingPhase(nn.Module):
     def training_step(
             self, 
             batch
-    ):
+    ) -> None:
         torch.cuda.empty_cache()
         #Defining the img and mask
         ground_truth, prior_mask = batch
         x = torch.clone(ground_truth)
         for i, args in enumerate(self.network):
             x, updated_mask = self.single_forward(x, prior_mask, *args)
-            L_hole, L_valid, L_perceptual, \
-                L_style_out, L_style_comp = self.criterion(x, ground_truth, prior_mask, updated_mask)
-            loss = L_hole + L_valid + L_perceptual + L_style_comp + L_style_out
-            
+            #Compute each term of the loss function
+            L_pixel, L_perceptual, L_style = self.criterion(x, ground_truth, prior_mask, updated_mask)
+            #Compute the final loss function
+            loss = L_pixel + L_perceptual + L_style
+            #Loading the metrics to tensorboard
             metrics = {
-                    f'Hole Loss': L_hole.detach().item(),
-                    f'Validation Loss': L_valid.detach().item(),
-                    f'Perceptual loss': L_perceptual.detach().item(),
-                    f'Predicted Style Loss': L_style_out.detach().item(),
-                    f'Diff Based Style Loss': L_style_comp.detach().item(),
-                    f'Overall': loss.detach().item()
-                }
-        
-            prior_mask = updated_mask
+                        f'Pixel-wise Loss': L_pixel.item(),
+                        f'Perceptual loss': L_perceptual.item(),
+                        f'Style Loss': L_style.item(),
+                        f'Overall': loss.item()
+                    }
             self.batch_metrics(metrics, f'Training/Layer_{i}')
             self.writer.flush()
+            #udpating the mask
+            prior_mask = updated_mask
         #backpropagate
         loss.backward()
         #gradient clipping
@@ -126,21 +122,17 @@ class TrainingPhase(nn.Module):
         lr_epoch = Tensor(self.lr_epoch).mean().item()
 
         train_metrics = {
-                f'Hole Loss': train_metrics[0],
-                f'Valid Loss': train_metrics[1],
-                f'Perceptual loss': train_metrics[2],
-                f'Predicted Style Loss': train_metrics[3],
-                f'Diff Based Style Loss': train_metrics[4],
-                f'Overall': train_metrics[5]
+                f'Pixel-wise Loss': train_metrics[0],
+                f'Perceptual Loss': train_metrics[1],
+                f'Style Loss': train_metrics[2],
+                f'Overall': train_metrics[3]
             }
-        
+
         val_metrics = {
-                f'Hole Loss': val_metrics[0],
-                f'Valid Loss': val_metrics[1],
-                f'Perceptual loss': val_metrics[2],
-                f'Predicted Style Loss': val_metrics[3],
-                f'Diff Based Style Loss': val_metrics[4],
-                f'Overall': val_metrics[5]
+                f'Pixel-wise Loss': val_metrics[0],
+                f'Perceptual Loss': val_metrics[1],
+                f'Style Loss': val_metrics[2],
+                f'Overall': val_metrics[3]
             }
         
         self.writer.add_scalars(
@@ -161,7 +153,15 @@ class TrainingPhase(nn.Module):
             'weight_decay': self.weight_decay,
             'grad_clip': torch.inf if not self.grad_clip else self.grad_clip,
             'Inpainting layers': self.layers,
-            'Convolution deepness': self.deep
+            'Convolution deepness': self.deep,
+            'Pixel: outter factor': self.criterion.alpha[0],
+            'Pixel: inner factor': self.criterion.alpha[1],
+            'Pixel: diff factor': self.criterion.alpha[2],
+            'Perceptual factor': self.criterion.alpha[3],
+            'Style: outter factor': self.criterion.alpha[4],
+            'Style: inner factor': self.criterion.alpha[5],
+            'Style: diff factor': self.criterion.alpha[6],
+            #insert contraint lambdas
             },
             train_metrics)
         
@@ -314,4 +314,87 @@ class CoronagraphReconstructor(TrainingPhase):
         for args in self.network:
             x, mask = self.single_forward(x, mask, *args)
         return x, mask
-    
+
+
+class DefaultResidual(nn.Module):
+    def __init__(self, channels: int, n_architecture: Tuple[int, ...] = (3,2,1)) -> None:
+        super().__init__()
+        self.conv_layers = nn.ModuleList([
+            PartialConv2d(channels, channels, 2*n + 1, 1, n) for n in n_architecture
+        ])
+    def forward(self, I_out: Tensor, mask_in: Tensor) -> Tuple[Tensor, Tensor]:
+        for layer in self.conv_layers:
+            I_out, mask_in = layer(I_out, mask_in)
+
+        return I_out, mask_in
+            
+        
+class Model(nn.Module):
+    layers: int = 3
+    def __init__(
+            self
+    ) -> None:
+        super().__init__()
+        self.residual_connection = ResidualConnection()
+        #First layer
+        self.conv1_1 = PartialConv2d(1, 64, 3, 1, 1)
+        self.act = nn.ReLU()
+        self.res1_1 = DefaultResidual(64, (7, 6, 5))
+        self.conv1_2 = PartialConv2d(64, 1, 3, 1, 1)
+        #Second layer
+        self.conv2_1 = PartialConv2d(1, 64, 3, 1, 1)
+        self.conv2_2 = PartialConv2d(64, 128, 3, 1, 1)
+        self.res2_1 = DefaultResidual(128, (5, 4, 3))
+        self.conv2_3 = PartialConv2d(128, 64, 3, 1, 1)
+        self.conv2_4 = PartialConv2d(64, 1, 3, 1, 1)
+
+        #Last layer
+        self.conv3_1 = PartialConv2d(1, 64, 3, 1, 1)
+        self.conv3_2 = PartialConv2d(64, 128, 3, 1, 1)
+        self.res3_1 = DefaultResidual(128, (4,3, 2))
+        self.conv3_3 = PartialConv2d(128, 64, 3, 1, 1)
+        self.conv3_4 = PartialConv2d(64, 1, 3, 1, 1)
+
+    def __per_layer_forward(self, layer: int,  I_out: Tensor, mask_in: Tensor) -> Tensor:
+        match layer:
+            case 0:
+                #first layer forward
+                out, mask = self.conv1_1(I_out, mask_in)
+                out = self.act(out)
+                out, mask = self.res1_1(out, mask)
+                out = self.act(out)
+                out, mask = self.conv1_2(out, mask)
+                return out, mask
+            case 1:
+                out, mask = self.conv2_1(I_out, mask_in)
+                out = self.act(out)
+                out, mask = self.conv2_2(out, mask)
+                out = self.act(out)
+                out, mask = self.res2_1(out, mask)
+                out = self.act(out)
+                out, mask = self.conv2_3(out, mask)
+                out = self.act(out)
+                out, mask = self.conv2_4(out, mask)
+                return out, mask
+            case 3:
+                out, mask = self.conv3_1(out, mask)
+                out = self.act(out)
+                out, mask = self.conv3_2(out, mask)
+                out = self.act(out)
+                out, mask = self.res3_1(out, mask)
+                out = self.act(out)
+                out, mask = self.conv3_3(out, mask)
+                out = self.act(out)
+                out, mask = self.conv3_4(out, mask)
+                return out, mask
+    def forward(self, I_out: Tensor, mask_in: Tensor) -> Tuple[Tensor, Tensor]:
+        for layer in range(self.layers):
+            I_out, mask_in = self.residual_connection(I_out, mask_in, lambda I_out, mask_in: self.__per_layer_forward(layer, I_out, mask_in))
+        return I_out, mask_in           
+
+class ResidualConnection(nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+    def forward(self, x: Tensor, mask_in: Tensor, sublayer: Callable[[Tensor, Tensor], Tuple[Tensor, Tensor]]) -> Tuple[Tensor, Tensor]:
+        y, mask_out = sublayer(x, mask_in)
+        return y + x, mask_out
