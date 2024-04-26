@@ -1,5 +1,5 @@
 [![license](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-
+[![code-style](https://img.shields.io/badge/code%20style-black-000000.svg)](https://github.com/psf/black)
 
 # Coronagraph Inpainting - Deep Learning approach
 The coronagraph data calibration routine in [SolarSoft](https://www.lmsal.com/solarsoft/) employs a fuzzy algorithm to generate a level 1 FITS file, addressing missing data holes. This project endeavors to introduce a novel deep learning methodology, leveraging [Partial Convolutions](https://arxiv.org/abs/1804.07723), to effectively address typical manifestations of data loss in coronagraphic imagery. By harnessing the capabilities of [Partial Convolutions](https://arxiv.org/abs/1804.07723), this approach aims to enhance the robustness and efficiency of data restoration processes.\
