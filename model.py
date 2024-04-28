@@ -910,10 +910,7 @@ class SmallUNet(TrainingPhase):
         x, mask_in = self.upsample(x, mask_in)
         return x, mask_in
 
-    def _single_forward(self, x: Tensor, mask_in: Tensor, layer: int) -> Tuple[Tensor, Tensor]:
-        mask_1 = mask_in.clone()
-        gt = x.clone()
-        
+    def encoder(self, x: Tensor, mask_in: Tensor, layer: int) -> Tuple[Tensor, Tensor]:
         x, mask_in = self.__getattr__(f'conv{layer}_1')(x, mask_in) # -> 32, 1024, 1024
         x_1 = self.__getattr__(f'norm{layer}_1')(x)
         x, mask_in = self._act_maxpool(x_1, mask_in) # -> 32, 512, 512
@@ -935,7 +932,9 @@ class SmallUNet(TrainingPhase):
         x, mask_in = self._act_maxpool(x_5, mask_in) # -> 512, 32, 32
 
         x, mask_in = self.__getattr__(f'conv{layer}_6')(x, mask_in)  # -> 1024, 32, 32
-        
+        return x_5, x_4, x_3, x_2, x_1, x, mask_in
+    
+    def decoder(self, x_5: Tensor, x_4: Tensor, x_3: Tensor, x_2: Tensor, x_1: Tensor, x: Tensor, mask_in: Tensor, layer: int) -> Tuple[Tensor, Tensor]:
         #Upsampling
         x, mask_in = self.__getattr__(f'upconv{layer}_1')(x, mask_in) # -> 512, 32, 32
         x = self.__getattr__(f'upnorm{layer}_1')(x)
@@ -971,7 +970,14 @@ class SmallUNet(TrainingPhase):
         
         x = self.spe_act(x)
 
-        return x * ~mask_1.bool() + gt * mask_1.bool(), mask_in
+        return x, mask_in
+    
+    def _single_forward(self, x: Tensor, mask_in: Tensor, layer: int) -> Tuple[Tensor, Tensor]:
+        
+        x_5, x_4, x_3, x_2, x_1, x, mask_in = self.encoder(x, mask_in, layer)
+        out, mask_out = self.decoder(x_5, x_4, x_3, x_2, x_1, x, mask_in, layer)
+
+        return out * ~mask_in.bool() + x * mask_in.bool(), mask_out
     
     def forward(self, x: Tensor, mask_in: Tensor) -> Tuple[Tensor, Tensor]:
         
@@ -1061,3 +1067,71 @@ class DefaultResidual(nn.Module):
             x = self.act(x)
 
         return I_out + x, mask_in
+
+
+class CrossModel(SmallUNet):
+    def __init__(self, name_run, criterion, layers):
+        super().__init__(name_run, criterion, layers)
+
+    @torch.no_grad()
+    def features(self, time: float, x_1: Tensor, layer: int) -> Tensor:
+        f_5, f_4, f_3, f_2, f_1, out, _ = self.encoder(x_1, torch.ones_like(x_1), layer)
+        
+        return f_5/time, f_4/time, f_3/time, f_2/time, f_1/time, out/time
+    
+    def _single_forward(self, x_2: Tensor, mask_in: Tensor, layer: int, f_5_scaled, f_4_scaled, f_3_scaled, f_2_scaled, f_1_scaled, f_scaled) -> Tuple[Tensor, Tensor]:
+        gt = x_2.clone()
+        # Defining time step features
+        f_5, f_4, f_3, f_2, f_1, x_2, mask_out = self.encoder(x_2, mask_in, layer)
+        # Defining new features
+        f_5 += f_5_scaled
+        f_4 += f_4_scaled
+        f_3 += f_3_scaled
+        f_2 += f_2_scaled
+        f_1 += f_1_scaled
+        # Multi head attention
+        x_2 += self.attention(x_2, f_scaled).view(*x_2.shape)
+        # Defining
+        x_2, mask_out = self.decoder(f_5, f_4, f_3, f_2, f_1, x_2, mask_out, layer)
+
+        return gt * mask_in.bool() + x_2 * ~mask_in.bool()
+    
+    def compute_train_loss(self, batch: Tensor) -> Tuple[None, Tensor]:
+        # Teacher forcing like method for training
+        x_1, x_2, time, prior_mask = batch
+        overall = 0
+        # Compute features
+        f_5_scaled, f_4_scaled, f_3_scaled, f_2_scaled, f_1_scaled, f_scaled = self.features(time, x_1, layer)
+         
+        for layer in range(self.layers):
+            I_out, updated_mask = self._single_forward(x_2, prior_mask, layer, f_5_scaled, f_4_scaled, f_3_scaled, f_2_scaled, f_1_scaled, f_scaled) # Feeding the ground truth so the training is not dependent of prior layers 
+            
+            args = self.criterion(I_out, x_2, prior_mask, updated_mask)
+
+            overall+=args[-1] # The last one is always the sum of the others
+
+            metrics = {key: value for key, value in zip(self.criterion.labels, args)}
+
+            self.batch_metrics(metrics, f"Training/Layer_{layer}")
+
+            prior_mask = updated_mask
+
+        return None, overall
+    
+    @torch.no_grad()
+    def compute_val_metrics(self, batch: Tensor) -> Tuple[Dict[str, float]]:
+        gt, l1 = batch
+        out, l2 = self(gt, l1)
+        args = self.criterion(out, gt, l1, l2)
+        metrics = {
+            key: value for key, value in zip(self.criterion.labels, [arg.item() for arg in args])
+        }       
+        return metrics
+    
+    def forward(self, x_1: Tensor, x_2: Tensor, time: float, mask_in: Tensor) -> Tuple[Tensor, Tensor]:
+        f_5_scaled, f_4_scaled, f_3_scaled, f_2_scaled, f_1_scaled, f_scaled = self.features(time, x_1, layer)
+  
+        for layer in range(self.layers):
+            x_2, mask_in = self._single_forward(x_2, mask_in, layer, f_5_scaled, f_4_scaled, f_3_scaled, f_2_scaled, f_1_scaled, f_scaled)
+
+        return x_2, mask_in    
