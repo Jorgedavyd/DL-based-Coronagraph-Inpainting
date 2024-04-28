@@ -1,4 +1,4 @@
-from typing import Tuple, Union, List, Dict, Any, Callable, Optional
+from typing import Tuple, Union, List, Dict, Any, Callable, Optional, Iterable
 from partial_conv import PartialConv2d
 from torch import Tensor
 from torch import nn
@@ -16,7 +16,8 @@ from data import NormalizeInverse
 import torchvision.transforms as tt
 from astropy.visualization import HistEqStretch, ImageNormalize
 import matplotlib.pyplot as plt
-
+from copy import deepcopy
+from utils import create_config
 def get_lr(optimizer):
     for param_group in optimizer.param_groups:
         return param_group["lr"]
@@ -32,7 +33,8 @@ class TrainingPhase(nn.Module):
         self, name_run: str, criterion
     ) -> None:
         super().__init__()
-        self.config: Dict[str, Any] = import_config(name_run)
+        self.name_run = name_run
+        self.config = create_config(name_run)
         # Tensorboard writer
         self.writer: SummaryWriter = SummaryWriter(f"{name_run}")
         self.name: str = name_run
@@ -41,7 +43,7 @@ class TrainingPhase(nn.Module):
         self.train_epoch: List[List[int]] = []
         self.val_epoch: List[List[int]] = []
         self.lr_epoch: List[List[int]] = []
-
+        self.num_runs: int = 0
     @torch.no_grad()
     def batch_metrics(self, metrics: dict, card: str) -> None:
 
@@ -102,16 +104,18 @@ class TrainingPhase(nn.Module):
         if self.grad_clip:
             nn.utils.clip_grad_value_(self.parameters(), self.grad_clip)
         # optimizer step
-        self.optimizer.step()
-        self.optimizer.zero_grad()
+        for optimizer in self.optimizer:
+            optimizer.step()
+            optimizer.zero_grad()
         # scheduler step
         if self.scheduler:
-            lr = get_lr(self.optimizer)
-            self.lr_epoch.append(lr)
-            self.writer.add_scalars(
-                "Training", {"lr": lr}, self.config["global_step_train"]
-            )
-            self.scheduler.step()
+            for idx, scheduler, optimizer in enumerate(zip(self.scheduler, self.optimizer)):
+                lr = get_lr(optimizer)
+                self.lr_epoch.append(lr)
+                self.writer.add_scalars(
+                    "Training", {f"lr_{idx}": lr}, self.config["global_step_train"]
+                )
+                scheduler.step()
         self.writer.flush()
         # Global step shift
         self.config["global_step_train"] += 1
@@ -169,56 +173,131 @@ class TrainingPhase(nn.Module):
     def save_config(self) -> None:
         os.makedirs(f"{self.name}/models", exist_ok=True)
         # Model weights
-        self.config["optimizer_state_dict"] = self.optimizer.state_dict()
+        self.config["optimizer_state_dict"] = deepcopy([optimizer.state_dict() for optimizer in self.optimizer])
         if self.scheduler is not None:
-            self.config["scheduler_state_dict"] = self.scheduler.state_dict()
-        self.config["model_state_dict"] = self.state_dict()
+            self.config["scheduler_state_dict"] = deepcopy([scheduler.state_dict() for scheduler in self.scheduler])
+        self.config["model_state_dict"] = deepcopy(self.state_dict())
 
         torch.save(
             self.config,
             f'./{self.name}/models/{self.config["name"]}_{self.config["epoch"]}.pt',
         )
-    scheduler: torch.optim.lr_scheduler  = None
+    @torch.no_grad()
+    def load_config(self) -> None:
+        root_path = f"./{self.name_run}/models"
+        files = sorted(os.listdir(root_path))
+        if len(files) == 0:
+            raise FileNotFoundError
+        for idx, file in enumerate(files):
+            print(f"{idx+1}. {file}")
+        config = int(input("Choose the config: "))
+
+        config: Dict[str, Any] = torch.load(
+            os.path.join(root_path, files[config])
+        )
+        # Modules
+        self.load_state_dict(config['model_state_dict'])    
+        #Optimizer
+        self.optimizer = [optimizer.load_state_dict(state) for optimizer, state in zip(self.optimizer, config['optimizer_state_dict'])]
+        #Scheduler
+        if self.scheduler is not None and config['scheduler_state_dict'] is not None:
+            self.scheduler = [scheduler.load_state_dict(state) for scheduler, state in zip(self.scheduler, config['scheduler_state_dict'])]
+        #Other parameters
+        self.config['epoch'] = config['epoch']
+        self.config['device'] = config['device']
+        self.config['global_step_train'] = config['global_step_train']
+        self.config['gloal_step_val'] = config['gloal_step_val']
+
+    scheduler  = None
+    def get_module_parameters(modules: Iterable[nn.Module, str], hyperparams: Iterable[Dict[str, float]]):
+        assert(len(modules)==len(hyperparams))
+        return [
+            {
+                'params': module
+            }.update(hyperparam) for module, hyperparam in zip(modules, hyperparams)
+        ]
+    
     def fit(
         self,
         train_loader: torch.utils.data.DataLoader,
         val_loader: torch.utils.data.DataLoader,
         epochs: int,
         batch_size: int,
-        lr: float,
-        weight_decay: float = 0.0,
+        lr: Union[float, Iterable[float]],
+        weight_decay: Union[float, Iterable[float]] = 0.0,
         grad_clip: bool = False,
-        opt_func: torch.optim = torch.optim.Adam,
-        lr_sched: torch.optim.lr_scheduler = None,
+        opt_func: Any = torch.optim.Adam,
+        lr_sched: Any = None,
         saving_div: int = 5,
         graph: bool = False,
         sample_input: Tensor = None,
+        modules: Iterable = None
     ) -> None:
-        #Clean the GPU cache
         torch.cuda.empty_cache()
+
+        if grad_clip and not isinstance(grad_clip, list) and isinstance(lr, list):
+            grad_clip = [grad_clip]*len(lr)
+
+        if modules is not None:
+            assert(len(modules)>1), 'Should have more than one module'
+        
+        if self.num_runs == 0:
+            if isinstance(opt_func, list):
+                assert(modules is not None), 'For different optimizers, should give different modules'
+                assert(lr_sched is None or isinstance(lr_sched, list)), 'Not valid amount of schedulers'
+                assert(len(opt_func) == len(weight_decay) and len(weight_decay) == len(lr) and len(lr) == len(lr_sched) and len(lr_sched) == len(opt_func)), 'Should have same amount of learning rates, weight decays, schedulers and optimizers for multiple optimizers'
+                self.optimizer = [opt_func(parameters) for parameters in self.get_module_parameters(modules, [{
+                    "lr": lr_inst, "weight_decay": wd
+                } for lr_inst, wd in zip(lr, weight_decay)])]
+                
+                if grad_clip:
+                    for clip, optimizer in zip(grad_clip, self.optimizer):
+                        for param_group in optimizer.param_groups:
+                            torch.nn.utils.clip_grad_norm_(param_group['params'], clip)
+                        
+                self.scheduler = [
+                    lr_sched(optimizer, epoch = epochs, steps_per_epoch = len(train_loader)) for optimizer in self.optimizer
+                ]
+
+                self.load_config()
+
+            elif isinstance(lr, list):
+                assert (modules is not None)
+                assert (len(lr)==len(weight_decay)), 'Should have the same amount of learning rates and weight decays parameters.'
+                self.optimizer = opt_func(self.get_module_parameters(modules, [{
+                    "lr": lr_inst, "weight_decay": wd
+                } for lr_inst, wd in zip(lr, weight_decay)]))
+                
+                if grad_clip:
+                    for clip, param_group in zip(grad_clip, self.optimizer.param_groups):
+                        torch.nn.utils.clip_grad_norm_(param_group['params'], clip)
+
+                if lr_sched is not None:
+                    self.scheduler = [lr_sched(self.optimizer, epochs = epochs, steps_per_epoch = len(train_loader))]
+
+                self.optimizer = [self.optimizer]
+
+                self.load_config()
+            else:
+                self.optimizer = opt_func(self.parameters(), lr, weight_decay=weight_decay)
+                if grad_clip:
+                    for param_group in self.optimizer.param_groups:
+                        torch.nn.utils.clip_grad_norm_(param_group['params'], clip)
+                if lr_sched is not None:
+                    self.scheduler = [lr_sched(self.optimizer,lr,  epochs = epochs, steps_per_epoch = len(train_loader))]
+                self.optimizer = [self.optimizer]
+                self.load_config()
+        else:
+            for optimizer in self.optimizer:
+                for parameter, LR, wd in zip(optimizer.param_groups, lr, weight_decay):
+                    parameter['lr'] = LR
+                    parameter['weight_decay'] = wd
+            
+        #Clean the GPU cache
         if graph:
             assert (
                 sample_input is not None
             ), "If you want to visualize a graph, you must pass through a sample tensor"
-        # Loading previous configs of optimizer and scheduler.
-        if self.config["optimizer_state_dict"] is not None:
-            self.optimizer = opt_func(
-                self.parameters(), lr, weight_decay=weight_decay
-            ).load_state_dict(self.config["optimizer_state_dict"])
-            self.optimizer.param_groups[0]["lr"] = lr
-        else:
-            self.optimizer = opt_func(self.parameters(), lr, weight_decay=weight_decay)
-        if lr_sched is not None:
-            if self.config["scheduler_state_dict"] is not None:
-                self.scheduler = lr_sched(
-                    self.optimizer, lr, epochs=epochs, steps_per_epoch=len(train_loader)
-                ).load_state_dict(self.config["scheduler_state_dict"])
-                self.scheduler.learning_rate = lr
-            else:
-                self.scheduler = lr_sched(
-                    self.optimizer, lr, epochs=epochs, steps_per_epoch=len(train_loader)
-                )
-            lr_sched = True
         #Build graph in tensorboard
         if graph and sample_input:
             self.writer.add_graph(self, sample_input)
@@ -247,8 +326,6 @@ class TrainingPhase(nn.Module):
             self.imshow(val_loader)
             # End of epoch
             self.end_of_epoch()
-
-
 
 class SingleLayer(TrainingPhase):
     
@@ -802,24 +879,24 @@ class SmallUNet(TrainingPhase):
         # Backbone
         for layer in range(layers):
             #Downsampling
-            self.__setattr__(f'conv{layer}_1', PartialConv2d(1, 32, 7, 1, 3)) # -> 32, 1024, 1024
+            self.__setattr__(f'conv{layer}_1', PartialConv2d(1, 32, 9, 1, 4)) # -> 32, 1024, 1024
             self.__setattr__(f'norm{layer}_1', nn.BatchNorm2d(32)) 
-            self.__setattr__(f'conv{layer}_2', PartialConv2d(32, 64, 5, 1, 2)) # -> 64, 512, 512
+            self.__setattr__(f'conv{layer}_2', PartialConv2d(32, 64, 7, 1, 3)) # -> 64, 512, 512
             self.__setattr__(f'norm{layer}_2', nn.BatchNorm2d(64))
-            self.__setattr__(f'conv{layer}_3', PartialConv2d(64, 128, 3, 1, 1)) # -> 128, 256, 256
+            self.__setattr__(f'conv{layer}_3', PartialConv2d(64, 128, 5, 1, 2)) # -> 128, 256, 256
             self.__setattr__(f'norm{layer}_3', nn.BatchNorm2d(128))
             self.__setattr__(f'conv{layer}_4', PartialConv2d(128, 256, 3, 1, 1)) # -> 256, 128, 128
             self.__setattr__(f'norm{layer}_4', nn.BatchNorm2d(256))
             self.__setattr__(f'conv{layer}_5', PartialConv2d(256, 512, 3, 1, 1)) # -> 512, 64, 64
             self.__setattr__(f'norm{layer}_5', nn.BatchNorm2d(512))
-            self.__setattr__(f'conv{layer}_6', PartialConv2d(512, 1024, 3, 1, 1)) # -> 512, 32, 32
+            self.__setattr__(f'conv{layer}_6', PartialConv2d(512, 1024, 3, 1, 1)) # -> 1024, 32, 32
             
             #Upsampling
-            self.__setattr__(f'upconv{layer}_1', PartialConv2d(1024, 512, 7, 1 ,3)) # -> 512, 32, 32
+            self.__setattr__(f'upconv{layer}_1', PartialConv2d(1024, 512, 9, 1 ,4)) # -> 512, 32, 32
             self.__setattr__(f'upnorm{layer}_1', nn.BatchNorm2d(512))
-            self.__setattr__(f'upconv{layer}_2', PartialConv2d(512, 256, 5, 1, 2)) # -> 256, 64, 64
+            self.__setattr__(f'upconv{layer}_2', PartialConv2d(512, 256, 7, 1, 3)) # -> 256, 64, 64
             self.__setattr__(f'upnorm{layer}_2', nn.BatchNorm2d(256))
-            self.__setattr__(f'upconv{layer}_3', PartialConv2d(256, 128, 3, 1, 1)) # -> 128, 128, 128
+            self.__setattr__(f'upconv{layer}_3', PartialConv2d(256, 128, 5, 1, 2)) # -> 128, 128, 128
             self.__setattr__(f'upnorm{layer}_3', nn.BatchNorm2d(128))
             self.__setattr__(f'upconv{layer}_4', PartialConv2d(128, 64, 3, 1, 1)) # -> 64, 256, 256
             self.__setattr__(f'upnorm{layer}_4', nn.BatchNorm2d(64))
@@ -896,7 +973,7 @@ class SmallUNet(TrainingPhase):
 
         x += x_1
         
-        x, mask_in = self.__getattr__(f'upconv{layer}_4')(x, mask_in) # -> 1, 1024, 1024
+        x, mask_in = self.__getattr__(f'upconv{layer}_6')(x, mask_in) # -> 1, 1024, 1024
         
         x = self.spe_act(x)
 
@@ -960,40 +1037,27 @@ class SmallUNet(TrainingPhase):
             M_l_1 = M_l_1[0, :, :, :]
             M_l_2 = M_l_2[0, :, :, :]
 
-            inner_out = (I_out[0, :, :, :]*~M_l_2.bool()).unsqueeze(0)
-            inner_out: np.array = self.inverse_transform(inner_out)
-            
-            I_out: np.array = self.inverse_transform(I_out[0, :, :, :].unsqueeze(0))
-            I_gt: np.array = self.inverse_transform(I_gt[0, :, :, :].unsqueeze(0))
+            I_out: np.array = I_out[0, :, :, :].view(1024, 1024).detach().cpu().numpy()
+            I_gt: np.array = I_gt[0, :, :, :].view(1024, 1024).detach().cpu().numpy()
 
             mathcal_M = (M_l_1.bool() ^ M_l_2.bool()).cpu().detach().view(1024, 1024).numpy()
 
             M_l_2 = M_l_2.cpu().detach().view(1024, 1024).numpy()
 
-            gt_norm = ImageNormalize(stretch = HistEqStretch(I_gt[np.isfinite(I_gt)]))(I_gt)
+            diff = I_out*mathcal_M
 
-            out_norm = ImageNormalize(stretch = HistEqStretch(I_out[np.isfinite(I_out)]))(I_out)
-
-            I_out = I_out*mathcal_M
-
-            diff_norm = ImageNormalize(stretch = HistEqStretch(I_out[np.isfinite(I_out)]))(I_out)
-
-            inner_norm = ImageNormalize(stretch = HistEqStretch(inner_out[np.isfinite(inner_out)]))(inner_out)
             #Make plot
-            fig, ax = plt.subplots(1, 4)
-            ax[0].imshow(gt_norm)
-            plt.yticks([])
-            plt.xticks([])
-            ax[1].imshow(out_norm)
-            plt.yticks([])
-            plt.xticks([])
-            ax[2].imshow(diff_norm)
-            plt.yticks([])
-            plt.xticks([])
-            ax[3].imshow(inner_norm)
-            plt.yticks([])
-            plt.xticks([])
+            fig, axes = plt.subplots(1, 3)
+            axes[0].imshow(I_gt)
+            axes[1].imshow(I_out)
+            axes[2].imshow(diff)
+
+            for ax in axes:
+                ax.set_xticks([])
+                ax.set_yticks([])
+
             plt.show()
+            fig.savefig(f'{self.config["epoch"]}.png')
             break
 
 class DefaultResidual(nn.Module):

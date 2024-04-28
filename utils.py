@@ -42,12 +42,13 @@ def create_config(name_run: str):
 
 def import_config(name_run):
     try:
-        files = os.listdir(f"./{name_run}/models")
+        root_path = f"./{name_run}/models"
+        files = os.listdir(root_path)
         if len(files) == 0:
             raise FileNotFoundError
         for idx, file in enumerate(files):
             print(f"{idx+1}. {file}")
         config = int(input("Choose the config: "))
-        return torch.load(files[config - 1])
+        return torch.load(os.path.join(root_path, files[config - 1]))
     except FileNotFoundError:
         return create_config(name_run)

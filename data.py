@@ -13,6 +13,8 @@ from typing import Dict
 import random
 from torch import Tensor
 import torchvision.transforms as tt
+from astropy.visualization import HistEqStretch, ImageNormalize
+
 
 scrap_date_list = [
     (datetime(1998, 5, 6), datetime(1998, 5, 7)),  # Solar Storm of May 1998
@@ -93,20 +95,12 @@ class CoronagraphDataset(Dataset):
         self.image_paths: List[str] = [
             self.path(filename) for filename in os.listdir(self.path(""))
         ]
-        self.mean = np.mean(np.array([np.mean(fits.getdata(filename).astype(np.float32)) for filename in self.image_paths]))
-        self.std = np.mean(np.array([np.std(fits.getdata(filename).astype(np.float32)) for filename in self.image_paths]))
         # main transform
         self.transform = tt.Compose(
             [
+                tt.Lambda(lambda x: ImageNormalize(stretch = HistEqStretch(x[np.isfinite(x)]))(x)),
                 tt.ToTensor(),
                 tt.Resize((1024, 1024), antialias=True),
-                tt.Normalize(self.mean, self.std)
-            ]
-        )
-        self.inverse_transform = tt.Compose(
-            [
-                NormalizeInverse(self.mean, self.std),
-                tt.Lambda(lambda x: x.view(1024, 1024).numpy())
             ]
         )
 
