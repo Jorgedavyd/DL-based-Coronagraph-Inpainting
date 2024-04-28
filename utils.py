@@ -2,8 +2,6 @@ import torch
 import os
 
 ## GPU usage
-
-
 def get_default_device():
     return torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
 
@@ -38,17 +36,3 @@ def create_config(name_run: str):
         "optimizer_state_dict": None,
         "scheduler_state_dict": None,
     }
-
-
-def import_config(name_run):
-    try:
-        root_path = f"./{name_run}/models"
-        files = os.listdir(root_path)
-        if len(files) == 0:
-            raise FileNotFoundError
-        for idx, file in enumerate(files):
-            print(f"{idx+1}. {file}")
-        config = int(input("Choose the config: "))
-        return torch.load(os.path.join(root_path, files[config - 1]))
-    except FileNotFoundError:
-        return create_config(name_run)

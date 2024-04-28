@@ -39,6 +39,14 @@ class NewInpaintingLoss(nn.Module):
         self.alpha: Iterable = alpha
         self.fe = FeatureExtractor()
 
+        self.labels = ['Pixel Loss', 'Perceptual Loss', 'Style Loss', 'Overall']
+        self.factors = {
+            'Pixel inner': alpha[0],
+            'Pixel diff': alpha[1],
+            'Perceptual': alpha[2],
+            'Style inner': alpha[3],
+            'Style diff': alpha[4]
+        }
         sample_tensor: Tensor = torch.randn(32, 1, 1024, 1024)
         self.dim_per_layer: List[List[int]] = []
         F_p: List[int] = []
@@ -118,7 +126,7 @@ class NewInpaintingLoss(nn.Module):
             / self.F_p
         ).sum()
 
-        return L_pixel, L_perceptual, L_style
+        return L_pixel, L_perceptual, L_style, L_pixel + L_perceptual + L_style 
 
 class OldInpaintingLoss(nn.Module):
     def __init__(self, alpha: Iterable = [4, 6, 4, 0.05, 110, 120, 110]) -> None:

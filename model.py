@@ -18,17 +18,12 @@ from astropy.visualization import HistEqStretch, ImageNormalize
 import matplotlib.pyplot as plt
 from copy import deepcopy
 from utils import create_config
+
 def get_lr(optimizer):
     for param_group in optimizer.param_groups:
         return param_group["lr"]
     
 class TrainingPhase(nn.Module):
-    mean: float = 6.2027994e-10
-    std: float = 1.1295398e-09
-    inverse_transform = tt.Compose([
-            NormalizeInverse(mean, std),
-            tt.Lambda(lambda x: x.cpu().detach().view(1024, 1024).numpy())
-        ])
     def __init__(
         self, name_run: str, criterion
     ) -> None:
@@ -76,46 +71,37 @@ class TrainingPhase(nn.Module):
 
     @torch.no_grad()
     def validation_step(self, batch) -> None:
-        img, prior_mask = batch
-        x = torch.clone(img)
-        x, updated_mask = self(x, prior_mask)
-        L_pixel, L_perceptual, L_style = self.criterion(
-            x, img, prior_mask, updated_mask
-        )
-        metrics = {
-            f"Pixel-wise Loss": L_pixel.item(),
-            f"Perceptual loss": L_perceptual.item(),
-            f"Style Loss": L_style.item(),
-            f"Overall": (L_pixel + L_perceptual + L_style).item(),
-        }
+        metrics = self.compute_val_metrics(batch)
         self.batch_metrics(metrics, "Validation")
         self.config["global_step_val"] += 1
 
     def training_step(self, batch) -> None:
         # Getting the metrics and the loss from the built in training forward
-        metrics, loss = self.loss(batch)
+        metrics, loss = self.compute_train_loss(batch)
         # If metrics were passed, write them on tensorboard
-        if isinstance(metrics, dict):
+        if metrics is not None:
             self.batch_metrics(metrics, f"Training")
             self.writer.flush()
         # backpropagate
         loss.backward()
         # gradient clipping
         if self.grad_clip:
-            nn.utils.clip_grad_value_(self.parameters(), self.grad_clip)
+            for grad_clip, params in zip(grad_clip, self.model_grouped):
+                nn.utils.clip_grad_value_(params, grad_clip)
         # optimizer step
         for optimizer in self.optimizer:
             optimizer.step()
             optimizer.zero_grad()
         # scheduler step
         if self.scheduler:
-            for idx, scheduler, optimizer in enumerate(zip(self.scheduler, self.optimizer)):
-                lr = get_lr(optimizer)
-                self.lr_epoch.append(lr)
-                self.writer.add_scalars(
-                    "Training", {f"lr_{idx}": lr}, self.config["global_step_train"]
-                )
-                scheduler.step()
+            for scheduler, optimizer in zip(self.scheduler, self.optimizer):
+                if scheduler is not None:
+                    lr = get_lr(optimizer)
+                    self.lr_epoch.append(lr)
+                    self.writer.add_scalars(
+                        "Training", {f"lr_{optimizer.__class__.__name__}": lr}, self.config["global_step_train"]
+                    )
+                    scheduler.step()
         self.writer.flush()
         # Global step shift
         self.config["global_step_train"] += 1
@@ -127,17 +113,10 @@ class TrainingPhase(nn.Module):
         lr_epoch = Tensor(self.lr_epoch).mean().item()
 
         train_metrics = {
-            f"Pixel-wise Loss": train_metrics[0],
-            f"Perceptual Loss": train_metrics[1], #Future update automate this section
-            f"Style Loss": train_metrics[2],
-            f"Overall": train_metrics[3],
+            key: value for key, value in zip(self.criterion.labels, train_metrics)
         }
-
         val_metrics = {
-            f"Pixel-wise Loss": val_metrics[0],
-            f"Perceptual Loss": val_metrics[1],
-            f"Style Loss": val_metrics[2],
-            f"Overall": val_metrics[3],
+            key: value for key, value in zip(self.criterion.labels, val_metrics)
         }
 
         self.writer.add_scalars(
@@ -147,21 +126,25 @@ class TrainingPhase(nn.Module):
             "Validation/Epoch", val_metrics, global_step=self.config["epoch"]
         )
 
-        self.writer.add_hparams(
-            {
-                "epochs": self.config["epoch"],
-                "init_learning_rate": lr_epoch,
-                "batch_size": self.batch_size,
-                "weight_decay": self.weight_decay,
-                "grad_clip": torch.inf if not self.grad_clip else self.grad_clip, # and this one
-                "Pixel: outter factor": self.criterion.alpha[0],
-                "Pixel: inner factor": self.criterion.alpha[1],
-                "Perceptual factor": self.criterion.alpha[2],
-                "Style: outter factor": self.criterion.alpha[3],
-                "Style: inner factor": self.criterion.alpha[4],
-            },
-            train_metrics,
-        )
+        hparams = {
+            "Epochs": self.config["epoch"],
+            "Batch Size": self.batch_size
+        }
+        # Criterion factors
+        hparams.update(self.criterion.factors)
+        # Learning rate
+        hparams.update({
+            f'lr_{optimizer.__class__.__name__}_{idx}': param_group['lr'] for optimizer in self.optimizer for idx, param_group in enumerate(optimizer.param_groups)
+        })
+        # Weight decay
+        hparams.update({
+            f'weight_decay_{optimizer.__class__.__name__}_{idx}': param_group['weight_decay'] for optimizer in self.optimizer for idx, param_group in enumerate(optimizer.param_groups)
+        })
+        # Gradient clipping
+        hparams.update({
+            f'grad_clip_{optimizer.__class__.__name__}': clip for optimizer, clip in zip(self.optimizer, self.grad_clip)
+        })
+        self.writer.add_hparams(hparams, train_metrics, global_step = self.config['epoch'])
 
         self.writer.flush()
 
@@ -190,8 +173,11 @@ class TrainingPhase(nn.Module):
             raise FileNotFoundError
         for idx, file in enumerate(files):
             print(f"{idx+1}. {file}")
-        config = int(input("Choose the config: "))
-
+        try:
+            config = int(input("Choose the config: "))
+        except ValueError:
+            return None
+        
         config: Dict[str, Any] = torch.load(
             os.path.join(root_path, files[config])
         )
@@ -208,7 +194,7 @@ class TrainingPhase(nn.Module):
         self.config['global_step_train'] = config['global_step_train']
         self.config['gloal_step_val'] = config['gloal_step_val']
 
-    scheduler  = None
+    scheduler = [None]
     def get_module_parameters(modules: Iterable[nn.Module, str], hyperparams: Iterable[Dict[str, float]]):
         assert(len(modules)==len(hyperparams))
         return [
@@ -234,61 +220,69 @@ class TrainingPhase(nn.Module):
         modules: Iterable = None
     ) -> None:
         torch.cuda.empty_cache()
+        #Given a list of learning rates
+        if isinstance(lr, list):
+            assert (isinstance(weight_decay, (tuple, list, set))), 'Must define the regularization term for every param group or optimizer'
+            assert (len(lr) == len(weight_decay)), 'Should have the same amount of learning rates and regularization parameters'
+            if grad_clip:
+                assert (isinstance(grad_clip, (tuple, list, set))), 'You should define the gradient clipping term for every param group or optimizer'
+                assert (len(grad_clip) == len(lr)), 'Should have the same amount of learning rates and gradient clipping parameters'
+            assert (modules is not None), 'Should define by param groups with modules argument for different learning rates or optimizers'
+            assert (len(modules)>1), 'Should have more than one module'
+            self.model_grouped = self.get_module_parameters(modules)
+            if isinstance(opt_func, (tuple, list, set)):
+                if isinstance(lr_sched, (tuple, list, set)):
+                    assert(len(lr_sched) == len(opt_func) == len(lr) or len(lr_sched) == 1 or lr_sched is None), 'Learning rate scheduler not correctly defined'
+            else:
+                assert (lr_sched is None or not isinstance(lr_sched, (tuple, list, set)))
 
-        if grad_clip and not isinstance(grad_clip, list) and isinstance(lr, list):
-            grad_clip = [grad_clip]*len(lr)
-
-        if modules is not None:
-            assert(len(modules)>1), 'Should have more than one module'
-        
+        # If it's the first run on notebook, we need to define and load parameters from previous loops
         if self.num_runs == 0:
+            #More than one optimizer
             if isinstance(opt_func, list):
-                assert(modules is not None), 'For different optimizers, should give different modules'
-                assert(lr_sched is None or isinstance(lr_sched, list)), 'Not valid amount of schedulers'
-                assert(len(opt_func) == len(weight_decay) and len(weight_decay) == len(lr) and len(lr) == len(lr_sched) and len(lr_sched) == len(opt_func)), 'Should have same amount of learning rates, weight decays, schedulers and optimizers for multiple optimizers'
-                self.optimizer = [opt_func(parameters) for parameters in self.get_module_parameters(modules, [{
-                    "lr": lr_inst, "weight_decay": wd
-                } for lr_inst, wd in zip(lr, weight_decay)])]
-                
-                if grad_clip:
-                    for clip, optimizer in zip(grad_clip, self.optimizer):
-                        for param_group in optimizer.param_groups:
-                            torch.nn.utils.clip_grad_norm_(param_group['params'], clip)
-                        
-                self.scheduler = [
-                    lr_sched(optimizer, epoch = epochs, steps_per_epoch = len(train_loader)) for optimizer in self.optimizer
-                ]
-
+                # Defining each of the optimizers
+                self.optimizer = [optimizer(module, lr = LR, weight_decay = wd) for optimizer, module, LR, wd in zip(opt_func, self.model_grouped, lr, weight_decay)]
+                # Defining each of the schedulers
+                if isinstance(lr_sched, (list, tuple, set)):
+                    if len(lr_sched) == 1:
+                        self.scheduler = [lr_sched[0](optimizer, epoch = epochs, step_per_epoch = len(train_loader)) for optimizer in self.optimizer]
+                    else:
+                        self.scheduler = [scheduler(optimizer, epoch = epochs, steps_per_epoch = len(train_loader)) if scheduler is not None else None for scheduler, optimizer in zip(lr_sched, self.optimizer)]
+                else:
+                    if lr_sched is None:
+                        self.scheduler = [lr_sched]*len(self.optimizer)
+                    else:
+                        self.scheduler = [lr_sched(optimizer, epoch = epochs, step_per_epoch = len(train_loader)) for optimizer in self.optimizer]
+                # Since first run, we load the configuration of prior trainings
                 self.load_config()
-
-            elif isinstance(lr, list):
-                assert (modules is not None)
-                assert (len(lr)==len(weight_decay)), 'Should have the same amount of learning rates and weight decays parameters.'
+            # If not more than one optimizer but different learning rates
+            elif isinstance(lr, (list, tuple, set)):
+                # Defining just one optimizer with param groups
                 self.optimizer = opt_func(self.get_module_parameters(modules, [{
                     "lr": lr_inst, "weight_decay": wd
                 } for lr_inst, wd in zip(lr, weight_decay)]))
                 
-                if grad_clip:
-                    for clip, param_group in zip(grad_clip, self.optimizer.param_groups):
-                        torch.nn.utils.clip_grad_norm_(param_group['params'], clip)
-
                 if lr_sched is not None:
                     self.scheduler = [lr_sched(self.optimizer, epochs = epochs, steps_per_epoch = len(train_loader))]
 
                 self.optimizer = [self.optimizer]
 
                 self.load_config()
+            # If none of that happens, normal training loop
             else:
+                # Defining the optimizer
                 self.optimizer = opt_func(self.parameters(), lr, weight_decay=weight_decay)
-                if grad_clip:
-                    for param_group in self.optimizer.param_groups:
-                        torch.nn.utils.clip_grad_norm_(param_group['params'], clip)
+                # Defining the scheduler
                 if lr_sched is not None:
                     self.scheduler = [lr_sched(self.optimizer,lr,  epochs = epochs, steps_per_epoch = len(train_loader))]
+                # Putting into list for sintax
                 self.optimizer = [self.optimizer]
+                #Loading last config
                 self.load_config()
         else:
             for optimizer in self.optimizer:
+                if isinstance(lr, float): lr = [lr]
+                if isinstance(weight_decay, float): weight_decay = [weight_decay]
                 for parameter, LR, wd in zip(optimizer.param_groups, lr, weight_decay):
                     parameter['lr'] = LR
                     parameter['weight_decay'] = wd
@@ -986,7 +980,7 @@ class SmallUNet(TrainingPhase):
 
         return x, mask_in
     
-    def loss(self, batch: Tensor) -> Tuple[None, Tensor]:
+    def compute_train_loss(self, batch: Tensor) -> Tuple[None, Tensor]:
         # Teacher forcing like method for training
         gt, prior_mask = batch
         overall = 0
@@ -994,18 +988,11 @@ class SmallUNet(TrainingPhase):
         for layer in range(self.layers):
             I_out, updated_mask = self._single_forward(gt, prior_mask, layer) # Feeding the ground truth so the training is not dependent of prior layers 
             
-            L_pixel, L_perceptual, L_style = self.criterion(I_out, gt, prior_mask, updated_mask)
+            args = self.criterion(I_out, gt, prior_mask, updated_mask)
 
-            loss = L_pixel + L_perceptual + L_style
+            overall+=args[-1] # The last one is always the sum of the others
 
-            overall+=loss
-
-            metrics = {
-                f"Pixel-wise Loss": L_pixel.item(),
-                f"Perceptual loss": L_perceptual.item(),
-                f"Style Loss": L_style.item(),
-                f"Overall": loss.item(),
-            }
+            metrics = {key: value for key, value in zip(self.criterion.labels, args)}
 
             self.batch_metrics(metrics, f"Training/Layer_{layer}")
 
@@ -1014,19 +1001,14 @@ class SmallUNet(TrainingPhase):
         return None, overall
     
     @torch.no_grad()
-    def validation_step(self, batch: Tensor) -> None:
-        gt, prior_mask = batch
-        x, mask = self(gt, prior_mask)
-        L_pixel, L_perceptual, L_style = self.criterion(x, gt, prior_mask, mask)
-        loss = L_pixel + L_perceptual + L_style
+    def compute_val_metrics(self, batch: Tensor) -> Tuple[Dict[str, float]]:
+        gt, l1 = batch
+        out, l2 = self(gt, l1)
+        args = self.criterion(out, gt, l1, l2)
         metrics = {
-                f"Pixel-wise Loss": L_pixel.item(),
-                f"Perceptual loss": L_perceptual.item(),
-                f"Style Loss": L_style.item(),
-                f"Overall": loss.item(),
-            }
-        self.batch_metrics(metrics, "Validation")
-        self.config["global_step_val"] += 1
+            key: value for key, value in zip(self.criterion.labels, [arg.item() for arg in args])
+        }       
+        return metrics
     
     def imshow(self, loader):
         for batch in loader:
