@@ -2,18 +2,15 @@ from typing import Tuple, Union, List, Dict, Any, Callable, Optional, Iterable
 from partial_conv import PartialConv2d
 from torch import Tensor
 from torch import nn
+from collections import defaultdict
 from torch.utils.tensorboard import SummaryWriter
 import torchmetrics.functional as f
 import torch.nn.functional as F
 from tqdm import tqdm
 import torch
 import os
-from utils import import_config
 import matplotlib.pyplot as plt
 import numpy as np
-import random
-from data import NormalizeInverse
-import torchvision.transforms as tt
 from astropy.visualization import HistEqStretch, ImageNormalize
 import matplotlib.pyplot as plt
 from copy import deepcopy
@@ -37,8 +34,10 @@ class TrainingPhase(nn.Module):
         # History of changes
         self.train_epoch: List[List[int]] = []
         self.val_epoch: List[List[int]] = []
-        self.lr_epoch: List[List[int]] = []
+        self.lr_epoch: Dict[str, List[float]] = defaultdict(list)
         self.num_runs: int = 0
+        os.makedirs(f'{self.name_run}/images/', exist_ok=True)
+    
     @torch.no_grad()
     def batch_metrics(self, metrics: dict, card: str) -> None:
 
@@ -76,41 +75,39 @@ class TrainingPhase(nn.Module):
         self.config["global_step_val"] += 1
 
     def training_step(self, batch) -> None:
-        # Getting the metrics and the loss from the built in training forward
+        # Compute loss and metrics
         metrics, loss = self.compute_train_loss(batch)
-        # If metrics were passed, write them on tensorboard
+        # Write metrics to TensorBoard
         if metrics is not None:
-            self.batch_metrics(metrics, f"Training")
-            self.writer.flush()
-        # backpropagate
+            self.batch_metrics(metrics, "Training")
+        # Backpropagation
         loss.backward()
-        # gradient clipping
+        # Gradient clipping
         if self.grad_clip:
-            for grad_clip, params in zip(grad_clip, self.model_grouped):
+            for grad_clip, params in zip(self.grad_clip, self.params):
                 nn.utils.clip_grad_value_(params, grad_clip)
-        # optimizer step
-        for optimizer in self.optimizer:
+        # Optimizer and scheduler steps
+        for optimizer, scheduler in zip(self.optimizer, self.scheduler):
             optimizer.step()
             optimizer.zero_grad()
-        # scheduler step
-        if self.scheduler:
-            for scheduler, optimizer in zip(self.scheduler, self.optimizer):
-                if scheduler is not None:
-                    lr = get_lr(optimizer)
-                    self.lr_epoch.append(lr)
+            if scheduler:
+                for param_group in optimizer.param_groups:
+                    lr = param_group['lr']
+                    idx = self.optimizer.index(optimizer)
+                    self.lr_epoch[f'{optimizer.__class__.__name__}_{idx}'].append(lr)
                     self.writer.add_scalars(
-                        "Training", {f"lr_{optimizer.__class__.__name__}": lr}, self.config["global_step_train"]
+                        "Training", {f"lr_{optimizer.__class__.__name__}_{idx}": lr}, self.config["global_step_train"]
                     )
                     scheduler.step()
-        self.writer.flush()
-        # Global step shift
+        # Increment global step
         self.config["global_step_train"] += 1
+        self.writer.flush()
 
     @torch.no_grad()
     def end_of_epoch(self) -> None:
         train_metrics = Tensor(self.train_epoch).mean(dim=-1)
         val_metrics = Tensor(self.val_epoch).mean(dim=-1)
-        lr_epoch = Tensor(self.lr_epoch).mean().item()
+        lr_epoch = {key:Tensor(value).mean().item() for key, value in self.lr_epoch.items()}
 
         train_metrics = {
             key: value for key, value in zip(self.criterion.labels, train_metrics)
@@ -133,9 +130,7 @@ class TrainingPhase(nn.Module):
         # Criterion factors
         hparams.update(self.criterion.factors)
         # Learning rate
-        hparams.update({
-            f'lr_{optimizer.__class__.__name__}_{idx}': param_group['lr'] for optimizer in self.optimizer for idx, param_group in enumerate(optimizer.param_groups)
-        })
+        hparams.update(lr_epoch)
         # Weight decay
         hparams.update({
             f'weight_decay_{optimizer.__class__.__name__}_{idx}': param_group['weight_decay'] for optimizer in self.optimizer for idx, param_group in enumerate(optimizer.param_groups)
@@ -144,14 +139,14 @@ class TrainingPhase(nn.Module):
         hparams.update({
             f'grad_clip_{optimizer.__class__.__name__}': clip for optimizer, clip in zip(self.optimizer, self.grad_clip)
         })
-        self.writer.add_hparams(hparams, train_metrics, global_step = self.config['epoch'])
+        self.writer.add_hparams(hparams, train_metrics)
 
         self.writer.flush()
 
         self.train_epoch = []
         self.val_epoch = []
-        self.lr_epoch = []
-
+        self.lr_epoch = defaultdict(list)
+    
     @torch.no_grad()
     def save_config(self) -> None:
         os.makedirs(f"{self.name}/models", exist_ok=True)
@@ -165,17 +160,18 @@ class TrainingPhase(nn.Module):
             self.config,
             f'./{self.name}/models/{self.config["name"]}_{self.config["epoch"]}.pt',
         )
+    
     @torch.no_grad()
     def load_config(self) -> None:
-        root_path = f"./{self.name_run}/models"
-        files = sorted(os.listdir(root_path))
-        if len(files) == 0:
-            raise FileNotFoundError
-        for idx, file in enumerate(files):
-            print(f"{idx+1}. {file}")
         try:
+            root_path = f"./{self.name_run}/models"
+            files = sorted(os.listdir(root_path))
+            if len(files) == 0:
+                raise FileNotFoundError
+            for idx, file in enumerate(files):
+                print(f"{idx+1}. {file}")
             config = int(input("Choose the config: "))
-        except ValueError:
+        except (ValueError, FileNotFoundError):
             return None
         
         config: Dict[str, Any] = torch.load(
@@ -192,10 +188,10 @@ class TrainingPhase(nn.Module):
         self.config['epoch'] = config['epoch']
         self.config['device'] = config['device']
         self.config['global_step_train'] = config['global_step_train']
-        self.config['gloal_step_val'] = config['gloal_step_val']
+        self.config['global_step_val'] = config['global_step_val']
 
     scheduler = [None]
-    def get_module_parameters(modules: Iterable[nn.Module, str], hyperparams: Iterable[Dict[str, float]]):
+    def get_module_parameters(modules: Iterable[Union[nn.Module, str]], hyperparams: Iterable[Dict[str, float]]):
         assert(len(modules)==len(hyperparams))
         return [
             {
@@ -229,7 +225,6 @@ class TrainingPhase(nn.Module):
                 assert (len(grad_clip) == len(lr)), 'Should have the same amount of learning rates and gradient clipping parameters'
             assert (modules is not None), 'Should define by param groups with modules argument for different learning rates or optimizers'
             assert (len(modules)>1), 'Should have more than one module'
-            self.model_grouped = self.get_module_parameters(modules)
             if isinstance(opt_func, (tuple, list, set)):
                 if isinstance(lr_sched, (tuple, list, set)):
                     assert(len(lr_sched) == len(opt_func) == len(lr) or len(lr_sched) == 1 or lr_sched is None), 'Learning rate scheduler not correctly defined'
@@ -240,8 +235,9 @@ class TrainingPhase(nn.Module):
         if self.num_runs == 0:
             #More than one optimizer
             if isinstance(opt_func, list):
+                self.params = self.get_module_parameters(modules)
                 # Defining each of the optimizers
-                self.optimizer = [optimizer(module, lr = LR, weight_decay = wd) for optimizer, module, LR, wd in zip(opt_func, self.model_grouped, lr, weight_decay)]
+                self.optimizer = [optimizer(module, lr = LR, weight_decay = wd) for optimizer, module, LR, wd in zip(opt_func, self.params, lr, weight_decay)]
                 # Defining each of the schedulers
                 if isinstance(lr_sched, (list, tuple, set)):
                     if len(lr_sched) == 1:
@@ -257,6 +253,7 @@ class TrainingPhase(nn.Module):
                 self.load_config()
             # If not more than one optimizer but different learning rates
             elif isinstance(lr, (list, tuple, set)):
+                self.params = self.get_module_parameters(modules)
                 # Defining just one optimizer with param groups
                 self.optimizer = opt_func(self.get_module_parameters(modules, [{
                     "lr": lr_inst, "weight_decay": wd
@@ -270,8 +267,9 @@ class TrainingPhase(nn.Module):
                 self.load_config()
             # If none of that happens, normal training loop
             else:
+                self.params = self.parameters()
                 # Defining the optimizer
-                self.optimizer = opt_func(self.parameters(), lr, weight_decay=weight_decay)
+                self.optimizer = opt_func(self.params, lr, weight_decay=weight_decay)
                 # Defining the scheduler
                 if lr_sched is not None:
                     self.scheduler = [lr_sched(self.optimizer,lr,  epochs = epochs, steps_per_epoch = len(train_loader))]
@@ -279,14 +277,21 @@ class TrainingPhase(nn.Module):
                 self.optimizer = [self.optimizer]
                 #Loading last config
                 self.load_config()
+        
+        if isinstance(lr, (float, int)): lr = [lr]
+        if isinstance(weight_decay, (float, int)): weight_decay = [weight_decay]
+        if isinstance(grad_clip, (float, int)): grad_clip = [grad_clip]
+        
+        if len(self.optimizer) > 1:
+            for optimizer, LR, wd in zip(self.optimizer, lr, weight_decay):
+                for parameter in optimizer.param_groups:
+                    parameter['lr'] = LR
+                    parameter['weight_decay'] = wd
         else:
             for optimizer in self.optimizer:
-                if isinstance(lr, float): lr = [lr]
-                if isinstance(weight_decay, float): weight_decay = [weight_decay]
                 for parameter, LR, wd in zip(optimizer.param_groups, lr, weight_decay):
                     parameter['lr'] = LR
                     parameter['weight_decay'] = wd
-            
         #Clean the GPU cache
         if graph:
             assert (
@@ -298,7 +303,6 @@ class TrainingPhase(nn.Module):
 
         # Defining hyperparameters as attributes of the model and training object
         self.batch_size = batch_size
-        self.weight_decay = weight_decay
         self.grad_clip = grad_clip
 
         for epoch in range(self.config["epoch"], self.config["epoch"] + epochs):
@@ -368,8 +372,6 @@ class SingleLayer(TrainingPhase):
         }
 
         self.batch_metrics(metrics, f"Training")
-        
-        self.writer.flush()
 
         loss.backward()
 
@@ -974,8 +976,8 @@ class SmallUNet(TrainingPhase):
     
     def _single_forward(self, x: Tensor, mask_in: Tensor, layer: int) -> Tuple[Tensor, Tensor]:
         
-        x_5, x_4, x_3, x_2, x_1, x, mask_in = self.encoder(x, mask_in, layer)
-        out, mask_out = self.decoder(x_5, x_4, x_3, x_2, x_1, x, mask_in, layer)
+        x_5, x_4, x_3, x_2, x_1, encoded, mask = self.encoder(x, mask_in, layer)
+        out, mask_out = self.decoder(x_5, x_4, x_3, x_2, x_1, encoded, mask, layer)
 
         return out * ~mask_in.bool() + x * mask_in.bool(), mask_out
     
@@ -1045,7 +1047,8 @@ class SmallUNet(TrainingPhase):
                 ax.set_yticks([])
 
             plt.show()
-            fig.savefig(f'{self.config["epoch"]}.png')
+
+            fig.savefig(f'{self.name_run}/images/{self.config["epoch"]}.png')
             break
 
 class DefaultResidual(nn.Module):
@@ -1068,11 +1071,10 @@ class DefaultResidual(nn.Module):
 
         return I_out + x, mask_in
 
-
 class CrossModel(SmallUNet):
     def __init__(self, name_run, criterion, layers):
         super().__init__(name_run, criterion, layers)
-
+        self.attention = nn.MultiheadAttention(32*32, num_heads = 8)
     @torch.no_grad()
     def features(self, time: float, x_1: Tensor, layer: int) -> Tensor:
         f_5, f_4, f_3, f_2, f_1, out, _ = self.encoder(x_1, torch.ones_like(x_1), layer)
@@ -1080,6 +1082,7 @@ class CrossModel(SmallUNet):
         return f_5/time, f_4/time, f_3/time, f_2/time, f_1/time, out/time
     
     def _single_forward(self, x_2: Tensor, mask_in: Tensor, layer: int, f_5_scaled, f_4_scaled, f_3_scaled, f_2_scaled, f_1_scaled, f_scaled) -> Tuple[Tensor, Tensor]:
+        b, c, h, w = x_2.shape
         gt = x_2.clone()
         # Defining time step features
         f_5, f_4, f_3, f_2, f_1, x_2, mask_out = self.encoder(x_2, mask_in, layer)
@@ -1089,8 +1092,18 @@ class CrossModel(SmallUNet):
         f_3 += f_3_scaled
         f_2 += f_2_scaled
         f_1 += f_1_scaled
-        # Multi head attention
-        x_2 += self.attention(x_2, f_scaled).view(*x_2.shape)
+
+        # Prepare queries, keys, and values for attention
+        query = x_2.view(b, c, -1).permute(0, 2, 1)  # Reshape for MultiheadAttention
+        key_value = f_scaled.view(b, c, -1).permute(0, 2, 1)
+
+        # Apply cross-attention
+        attn_output, _ = self.attention(query, key_value, key_value)
+
+        # Reshape attention output and add to x_2
+        attn_output = attn_output.permute(0, 2, 1).view(b, c, h, w)
+        x_2 += attn_output
+
         # Defining
         x_2, mask_out = self.decoder(f_5, f_4, f_3, f_2, f_1, x_2, mask_out, layer)
 

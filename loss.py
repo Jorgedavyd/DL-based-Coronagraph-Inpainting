@@ -1,9 +1,13 @@
 from torch import nn
-from typing import Iterable, List, Dict, Callable, Tuple
+from typing import Iterable, List, Dict, Callable, Tuple, Union
 import torch
 from torch import Tensor
 from torchvision.models import vgg19, VGG19_Weights
-
+def total_variation_loss(image):
+    # shift one pixel and get difference (for both x and y direction)
+    loss = torch.mean(torch.abs(image[:, :, :, :-1] - image[:, :, :, 1:])) + \
+        torch.mean(torch.abs(image[:, :, :-1, :] - image[:, :, 1:, :]))
+    return loss
 
 class FeatureExtractor(nn.Module):
     def __init__(self, layers: Iterable = [4, 9, 18]) -> None:
@@ -34,18 +38,19 @@ class NewInpaintingLoss(nn.Module):
     nn.Module implementation for inpainting training
     """
 
-    def __init__(self, alpha: Iterable = [4, 6, 0.05, 110, 120]) -> None:
+    def __init__(self, alpha: Iterable = [4, 6, 0.05, 110, 120, 0.1]) -> None:
         super().__init__()
         self.alpha: Iterable = alpha
         self.fe = FeatureExtractor()
 
-        self.labels = ['Pixel Loss', 'Perceptual Loss', 'Style Loss', 'Overall']
+        self.labels = ['Pixel Loss', 'Perceptual Loss', 'Style Loss', 'Total variance', 'Overall']
         self.factors = {
             'Pixel inner': alpha[0],
             'Pixel diff': alpha[1],
             'Perceptual': alpha[2],
             'Style inner': alpha[3],
-            'Style diff': alpha[4]
+            'Style diff': alpha[4],
+            'Total variance': alpha[5]
         }
         sample_tensor: Tensor = torch.randn(32, 1, 1024, 1024)
         self.dim_per_layer: List[List[int]] = []
@@ -125,8 +130,11 @@ class NewInpaintingLoss(nn.Module):
             )
             / self.F_p
         ).sum()
+        
+        L_tv = torch.mean(torch.abs(I_out[:, :, :, :-1] - I_out[:, :, :, 1:])) + torch.mean(torch.abs(I_out[:, :, :-1, :] - I_out[:, :, 1:, :]))
 
-        return L_pixel, L_perceptual, L_style, L_pixel + L_perceptual + L_style 
+        return L_pixel, L_perceptual, L_style, L_tv, L_pixel + L_perceptual + L_style + L_tv 
+
 
 class OldInpaintingLoss(nn.Module):
     def __init__(self, alpha: Iterable = [4, 6, 4, 0.05, 110, 120, 110]) -> None:
@@ -218,6 +226,8 @@ class OldInpaintingLoss(nn.Module):
             )
             / self.F_p
         ).sum()
+
+        # Total variance loss
 
         return L_pixel, L_perceptual, L_style
         

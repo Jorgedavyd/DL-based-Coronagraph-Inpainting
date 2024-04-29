@@ -54,22 +54,19 @@ scrap_date_list = [
 
 
 def create_mask():
-    center_x = random.randint(16, 31) * 32
-    center_y = random.randint(16, 31) * 32
+    # Create a rectangle
+    n = random.randint(1, 31)  # Random integer for n
+    m = random.randint(1, 31)  # Random integer for m
+    left = random.randint(0, 32 - n) * 32  # Ensure multiple of 32
+    top = random.randint(0, 32 - m) * 32  # Ensure multiple of 32
+    width = n * 32
+    height = m * 32
 
     mask = torch.ones(1024, 1024)
-    hole_size = random.randint(1, 31) * 32
-
-    # Determine the bounds for the hole
-    hole_left = max(center_x - hole_size // 2, 0)
-    hole_right = min(center_x + hole_size // 2, 1023)
-    hole_top = max(center_y - hole_size // 2, 0)
-    hole_bottom = min(center_y + hole_size // 2, 1023)
-
-    # Create the hole
-    mask[hole_top:hole_bottom, hole_left:hole_right] = 0
+    mask[top:top+height, left:left+width] = 0
 
     return mask
+
 class NormalizeInverse(tt.Normalize):
     """
     Undoes the normalization and returns the reconstructed images in the input domain.
@@ -95,7 +92,7 @@ class CoronagraphDataset(Dataset):
             Path(__file__).parent, "data", filename
         )
         self.image_paths: List[str] = [
-            self.path(filename) for filename in os.listdir(self.path(""))
+            self.path(filename) for filename in sorted(os.listdir(self.path("")))
         ]
         # main transform
         self.transform = tt.Compose(
@@ -127,16 +124,16 @@ class CrossDataset(CoronagraphDataset):
         x1_path = self.image_paths[idx]
         x2_path = self.image_path[idx + 1]
         x_1: np.array = fits.getdata(x1_path).astype(np.float32)
-        time_1: float = fits.getheader(x1_path)['date_obs']
+        time_1: float = datetime(fits.getheader(x1_path)['date_obs'].split('T')[-1], '%H:%m:%S.%f')
         x_2: np.array = fits.getdata(x2_path).astype(np.float32)
-        time_2: float = fits.getheader(x2_path)['date_obs']
+        time_2: float = datetime(fits.getheader(x2_path)['date_obs'].split('T')[-1], '%H:%m:%S.%f')
 
         x_1: Tensor = self.transform(x_1)
         x_2: Tensor = self.transform(x_2)
 
-        time = ((time_2 - time_1)/timedelta(minutes = 17)).total_seconds()
+        time = ((time_2 - time_1)/timedelta(minutes = 24)).total_seconds()/60
 
-        maks = create_mask().unsqueeze(0)
+        mask = create_mask().unsqueeze(0)
 
         return x_1, x_2, time, mask
 @dataclass
