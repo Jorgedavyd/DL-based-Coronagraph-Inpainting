@@ -14,7 +14,7 @@ import random
 from torch import Tensor
 import torchvision.transforms as tt
 from astropy.visualization import HistEqStretch, ImageNormalize
-
+from datetime import timedelta
 
 scrap_date_list = [
     (datetime(1998, 5, 6), datetime(1998, 5, 7)),  # Solar Storm of May 1998
@@ -84,6 +84,8 @@ class NormalizeInverse(tt.Normalize):
 
     def __call__(self, tensor):
         return super().__call__(tensor.clone())
+
+
 @dataclass
 class CoronagraphDataset(Dataset):
     tool: str
@@ -116,6 +118,27 @@ class CoronagraphDataset(Dataset):
 
         return img.type(torch.float32), mask
 
+class CrossDataset(CoronagraphDataset):
+    def __init__(self, tool):
+        super().__init__(tool)
+    def __len__(self) -> int:
+        return super().__len__() - 1
+    def __getitem__(self, idx: int) -> Dict[str, Tensor]:
+        x1_path = self.image_paths[idx]
+        x2_path = self.image_path[idx + 1]
+        x_1: np.array = fits.getdata(x1_path).astype(np.float32)
+        time_1: float = fits.getheader(x1_path)['date_obs']
+        x_2: np.array = fits.getdata(x2_path).astype(np.float32)
+        time_2: float = fits.getheader(x2_path)['date_obs']
+
+        x_1: Tensor = self.transform(x_1)
+        x_2: Tensor = self.transform(x_2)
+
+        time = ((time_2 - time_1)/timedelta(minutes = 17)).total_seconds()
+
+        maks = create_mask().unsqueeze(0)
+
+        return x_1, x_2, time, mask
 @dataclass
 class Data:
     tool: str
@@ -135,7 +158,6 @@ class Data:
             'fits'
         )
             
-
 
 if __name__ == "__main__":
     downloader = Data("c3")
