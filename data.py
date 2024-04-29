@@ -83,11 +83,9 @@ class NormalizeInverse(tt.Normalize):
         return super().__call__(tensor.clone())
 
 
-@dataclass
 class CoronagraphDataset(Dataset):
-    tool: str
-
-    def __post_init__(self):
+    def __init__(self, tool: str):
+        self.tool = tool
         self.path: Callable[[str], str] = lambda filename: os.path.join(
             Path(__file__).parent, "data", filename
         )
@@ -122,18 +120,20 @@ class CrossDataset(CoronagraphDataset):
         return super().__len__() - 1
     def __getitem__(self, idx: int) -> Dict[str, Tensor]:
         x1_path = self.image_paths[idx]
-        x2_path = self.image_path[idx + 1]
+        x2_path = self.image_paths[idx + 1]
+
         x_1: np.array = fits.getdata(x1_path).astype(np.float32)
-        time_1: float = datetime(fits.getheader(x1_path)['date_obs'].split('T')[-1], '%H:%m:%S.%f')
+        time_1: float = datetime.strptime(fits.getheader(x1_path)['date-obs'].split('T')[-1], '%H:%M:%S.%f')
+
         x_2: np.array = fits.getdata(x2_path).astype(np.float32)
-        time_2: float = datetime(fits.getheader(x2_path)['date_obs'].split('T')[-1], '%H:%m:%S.%f')
+        time_2: float = datetime.strptime(fits.getheader(x2_path)['date-obs'].split('T')[-1], '%H:%M:%S.%f')
 
-        x_1: Tensor = self.transform(x_1)
-        x_2: Tensor = self.transform(x_2)
+        x_1: Tensor = self.transform(x_1).type(torch.float32)
+        x_2: Tensor = self.transform(x_2).type(torch.float32)
 
-        time = ((time_2 - time_1)/timedelta(minutes = 24)).total_seconds()/60
+        time = Tensor([(time_2 - time_1)/timedelta(minutes = 24)]).type(torch.float32).unsqueeze(0).unsqueeze(0)
 
-        mask = create_mask().unsqueeze(0)
+        mask = create_mask().unsqueeze(0).type(torch.float32)
 
         return x_1, x_2, time, mask
 @dataclass

@@ -887,6 +887,8 @@ class SmallUNet(TrainingPhase):
             self.__setattr__(f'norm{layer}_5', nn.BatchNorm2d(512))
             self.__setattr__(f'conv{layer}_6', PartialConv2d(512, 1024, 3, 1, 1)) # -> 1024, 32, 32
             
+            # Multihead attention
+            self.__setattr__(f'att{layer}', nn.MultiheadAttention(1024, 8))
             #Upsampling
             self.__setattr__(f'upconv{layer}_1', PartialConv2d(1024, 512, 9, 1 ,4)) # -> 512, 32, 32
             self.__setattr__(f'upnorm{layer}_1', nn.BatchNorm2d(512))
@@ -975,9 +977,11 @@ class SmallUNet(TrainingPhase):
         return x, mask_in
     
     def _single_forward(self, x: Tensor, mask_in: Tensor, layer: int) -> Tuple[Tensor, Tensor]:
-        
+        b, _, _, _ = x.shape
         x_5, x_4, x_3, x_2, x_1, encoded, mask = self.encoder(x, mask_in, layer)
-        out, mask_out = self.decoder(x_5, x_4, x_3, x_2, x_1, encoded, mask, layer)
+        att_input  = encoded.view(b, 1024, -1)
+        att_output, _ = self.__getattr__(f'att{layer}')(att_input, att_input, att_input)
+        out, mask_out = self.decoder(x_5, x_4, x_3, x_2, x_1, encoded + att_output.view(b, 1024, 32, 32), mask, layer)
 
         return out * ~mask_in.bool() + x * mask_in.bool(), mask_out
     
@@ -1075,76 +1079,78 @@ class CrossModel(SmallUNet):
     def __init__(self, name_run, criterion, layers):
         super().__init__(name_run, criterion, layers)
         self.attention = nn.MultiheadAttention(32*32, num_heads = 8)
-    @torch.no_grad()
-    def features(self, time: float, x_1: Tensor, layer: int) -> Tensor:
-        f_5, f_4, f_3, f_2, f_1, out, _ = self.encoder(x_1, torch.ones_like(x_1), layer)
-        
-        return f_5/time, f_4/time, f_3/time, f_2/time, f_1/time, out/time
     
-    def _single_forward(self, x_2: Tensor, mask_in: Tensor, layer: int, f_5_scaled, f_4_scaled, f_3_scaled, f_2_scaled, f_1_scaled, f_scaled) -> Tuple[Tensor, Tensor]:
-        b, c, h, w = x_2.shape
+    def _single_forward(self, x_1: Tensor, x_2: Tensor, time: Tensor, mask_in: Tensor, layer: int) -> Tuple[Tensor, Tensor]:
+        b, _,_,_ = x_2.shape
         gt = x_2.clone()
         # Defining time step features
         f_5, f_4, f_3, f_2, f_1, x_2, mask_out = self.encoder(x_2, mask_in, layer)
+
+        # Defining features from previous time step
+        f_5_scaled, f_4_scaled, f_3_scaled, f_2_scaled, f_1_scaled, f_scaled, _ = self.encoder(x_1, torch.ones_like(x_1), layer)
+        
         # Defining new features
-        f_5 += f_5_scaled
-        f_4 += f_4_scaled
-        f_3 += f_3_scaled
-        f_2 += f_2_scaled
-        f_1 += f_1_scaled
+        f_5 += (f_5_scaled/time)
+        f_4 += (f_4_scaled/time)
+        f_3 += (f_3_scaled/time)
+        f_2 += (f_2_scaled/time)
+        f_1 += (f_1_scaled/time)
 
         # Prepare queries, keys, and values for attention
-        query = x_2.view(b, c, -1).permute(0, 2, 1)  # Reshape for MultiheadAttention
-        key_value = f_scaled.view(b, c, -1).permute(0, 2, 1)
+        query = x_2.view(b, 1024, -1)  # Reshape for MultiheadAttention
+        key_value = f_scaled.view(b, 1024, -1)
 
         # Apply cross-attention
         attn_output, _ = self.attention(query, key_value, key_value)
 
         # Reshape attention output and add to x_2
-        attn_output = attn_output.permute(0, 2, 1).view(b, c, h, w)
+        attn_output = attn_output.permute(0, 2, 1).view(b, 1024, 32, 32)
         x_2 += attn_output
 
         # Defining
         x_2, mask_out = self.decoder(f_5, f_4, f_3, f_2, f_1, x_2, mask_out, layer)
 
-        return gt * mask_in.bool() + x_2 * ~mask_in.bool()
+        return gt * mask_in.bool() + x_2 * ~mask_in.bool(), mask_out
     
     def compute_train_loss(self, batch: Tensor) -> Tuple[None, Tensor]:
         # Teacher forcing like method for training
         x_1, x_2, time, prior_mask = batch
         overall = 0
-        # Compute features
-        f_5_scaled, f_4_scaled, f_3_scaled, f_2_scaled, f_1_scaled, f_scaled = self.features(time, x_1, layer)
          
+        # Compute features
         for layer in range(self.layers):
-            I_out, updated_mask = self._single_forward(x_2, prior_mask, layer, f_5_scaled, f_4_scaled, f_3_scaled, f_2_scaled, f_1_scaled, f_scaled) # Feeding the ground truth so the training is not dependent of prior layers 
-            
+
+            I_out, updated_mask = self._single_forward(x_1, x_2, time, prior_mask, layer) # Feeding the ground truth so the training is not dependent of prior layers 
+            ## Computes all losses terms
             args = self.criterion(I_out, x_2, prior_mask, updated_mask)
 
+            ## Gets the loss that will be backwarded
             overall+=args[-1] # The last one is always the sum of the others
-
+            
+            ## Loading metrics into dictionary
             metrics = {key: value for key, value in zip(self.criterion.labels, args)}
 
+            ## Loading the metrics into tensorboard
             self.batch_metrics(metrics, f"Training/Layer_{layer}")
 
+            ## Updating the mask for the next time step
             prior_mask = updated_mask
 
         return None, overall
     
     @torch.no_grad()
     def compute_val_metrics(self, batch: Tensor) -> Tuple[Dict[str, float]]:
-        gt, l1 = batch
-        out, l2 = self(gt, l1)
-        args = self.criterion(out, gt, l1, l2)
+        x_1, x_2, time, prior_mask = batch
+        out, updated_mask = self(x_1, x_2, time, prior_mask)
+        args = self.criterion(out, x_2, prior_mask, updated_mask)
         metrics = {
             key: value for key, value in zip(self.criterion.labels, [arg.item() for arg in args])
         }       
         return metrics
     
     def forward(self, x_1: Tensor, x_2: Tensor, time: float, mask_in: Tensor) -> Tuple[Tensor, Tensor]:
-        f_5_scaled, f_4_scaled, f_3_scaled, f_2_scaled, f_1_scaled, f_scaled = self.features(time, x_1, layer)
   
         for layer in range(self.layers):
-            x_2, mask_in = self._single_forward(x_2, mask_in, layer, f_5_scaled, f_4_scaled, f_3_scaled, f_2_scaled, f_1_scaled, f_scaled)
+            x_2, mask_in = self._single_forward(x_1, x_2, time, mask_in, layer)
 
         return x_2, mask_in    
