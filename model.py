@@ -147,13 +147,12 @@ class TrainingPhase(nn.Module):
         self.val_epoch = []
         self.lr_epoch = defaultdict(list)
     
-    @torch.no_grad()
     def save_config(self) -> None:
         os.makedirs(f"{self.name}/models", exist_ok=True)
         # Model weights
-        self.config["optimizer_state_dict"] = deepcopy([optimizer.state_dict() for optimizer in self.optimizer])
+        self.config["optimizer_state_dicts"] = [deepcopy(optimizer.state_dict()) for optimizer in self.optimizer]
         if self.scheduler is not None:
-            self.config["scheduler_state_dict"] = deepcopy([scheduler.state_dict() for scheduler in self.scheduler])
+            self.config["scheduler_state_dicts"] = [deepcopy(scheduler.state_dict()) for scheduler in self.scheduler]
         self.config["model_state_dict"] = deepcopy(self.state_dict())
 
         torch.save(
@@ -162,7 +161,7 @@ class TrainingPhase(nn.Module):
         )
     
     @torch.no_grad()
-    def load_config(self) -> None:
+    def load_config(self, epochs, train_loader) -> None:
         try:
             root_path = f"./{self.name_run}/models"
             files = sorted(os.listdir(root_path))
@@ -170,7 +169,7 @@ class TrainingPhase(nn.Module):
                 raise FileNotFoundError
             for idx, file in enumerate(files):
                 print(f"{idx+1}. {file}")
-            config = int(input("Choose the config: "))
+            config = int(input("Choose the config: ")) - 1
         except (ValueError, FileNotFoundError):
             return None
         
@@ -180,10 +179,13 @@ class TrainingPhase(nn.Module):
         # Modules
         self.load_state_dict(config['model_state_dict'])    
         #Optimizer
-        self.optimizer = [optimizer.load_state_dict(state) for optimizer, state in zip(self.optimizer, config['optimizer_state_dict'])]
+        for optimizer, state in zip(self.optimizer, config['optimizer_state_dict']):
+            optimizer.load_state_dict(state)
         #Scheduler
         if self.scheduler is not None and config['scheduler_state_dict'] is not None:
-            self.scheduler = [scheduler.load_state_dict(state) for scheduler, state in zip(self.scheduler, config['scheduler_state_dict'])]
+            for scheduler, state in zip(self.scheduler, config['scheduler_state_dict']):
+                state['total_steps'] += epochs * int(len(train_loader))
+                scheduler.load_state_dict(state)
         #Other parameters
         self.config['epoch'] = config['epoch']
         self.config['device'] = config['device']
@@ -215,6 +217,7 @@ class TrainingPhase(nn.Module):
         sample_input: Tensor = None,
         modules: Iterable = None
     ) -> None:
+        self.num_runs += 1
         torch.cuda.empty_cache()
         #Given a list of learning rates
         if isinstance(lr, list):
@@ -232,7 +235,7 @@ class TrainingPhase(nn.Module):
                 assert (lr_sched is None or not isinstance(lr_sched, (tuple, list, set)))
 
         # If it's the first run on notebook, we need to define and load parameters from previous loops
-        if self.num_runs == 0:
+        if self.num_runs == 1:
             #More than one optimizer
             if isinstance(opt_func, list):
                 self.params = self.get_module_parameters(modules)
@@ -250,7 +253,7 @@ class TrainingPhase(nn.Module):
                     else:
                         self.scheduler = [lr_sched(optimizer, epoch = epochs, step_per_epoch = len(train_loader)) for optimizer in self.optimizer]
                 # Since first run, we load the configuration of prior trainings
-                self.load_config()
+                self.load_config(epochs, train_loader)
             # If not more than one optimizer but different learning rates
             elif isinstance(lr, (list, tuple, set)):
                 self.params = self.get_module_parameters(modules)
@@ -264,7 +267,7 @@ class TrainingPhase(nn.Module):
 
                 self.optimizer = [self.optimizer]
 
-                self.load_config()
+                self.load_config(epochs, train_loader)
             # If none of that happens, normal training loop
             else:
                 self.params = self.parameters()
@@ -276,7 +279,7 @@ class TrainingPhase(nn.Module):
                 # Putting into list for sintax
                 self.optimizer = [self.optimizer]
                 #Loading last config
-                self.load_config()
+                self.load_config(epochs, train_loader)
         
         if isinstance(lr, (float, int)): lr = [lr]
         if isinstance(weight_decay, (float, int)): weight_decay = [weight_decay]
