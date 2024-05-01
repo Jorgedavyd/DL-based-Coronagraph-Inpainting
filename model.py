@@ -328,6 +328,41 @@ class TrainingPhase(nn.Module):
             # End of epoch
             self.end_of_epoch()
 
+    def imshow(self, loader):
+        for batch in loader:
+            I_gt, M_l_1 = batch
+            
+            I_gt = I_gt[0, :, :, :]
+            M_l_1 = M_l_1[0, :, :, :]
+
+            I_out, M_l_2 = self(I_gt.unsqueeze(0), M_l_1.unsqueeze(0))
+            
+            I_out = I_out[0, :, :, :]
+            M_l_2 = M_l_2[0, :, :, :]
+
+            I_out: np.array = I_out.view(1024, 1024).detach().cpu().numpy()
+            I_gt: np.array = I_gt.view(1024, 1024).detach().cpu().numpy()
+
+            mathcal_M = (M_l_1.bool() ^ M_l_2.bool()).cpu().detach().view(1024, 1024).numpy()
+
+            M_l_2 = M_l_2.cpu().detach().view(1024, 1024).numpy()
+
+            diff = I_out*mathcal_M
+
+            #Make plot
+            fig, axes = plt.subplots(1, 3)
+            axes[0].imshow(I_gt)
+            axes[1].imshow(I_out)
+            axes[2].imshow(diff)
+
+            for ax in axes:
+                ax.set_xticks([])
+                ax.set_yticks([])
+
+            plt.show()
+
+            fig.savefig(f'{self.name_run}/images/{self.config["epoch"]}.png')
+            break
 class SingleLayer(TrainingPhase):
     
     def __init__(
@@ -1025,38 +1060,7 @@ class SmallUNet(TrainingPhase):
         }       
         return metrics
     
-    def imshow(self, loader):
-        for batch in loader:
-            I_gt, M_l_1 = batch
-
-            I_out, M_l_2 = self(I_gt, M_l_1)
-
-            M_l_1 = M_l_1[0, :, :, :]
-            M_l_2 = M_l_2[0, :, :, :]
-
-            I_out: np.array = I_out[0, :, :, :].view(1024, 1024).detach().cpu().numpy()
-            I_gt: np.array = I_gt[0, :, :, :].view(1024, 1024).detach().cpu().numpy()
-
-            mathcal_M = (M_l_1.bool() ^ M_l_2.bool()).cpu().detach().view(1024, 1024).numpy()
-
-            M_l_2 = M_l_2.cpu().detach().view(1024, 1024).numpy()
-
-            diff = I_out*mathcal_M
-
-            #Make plot
-            fig, axes = plt.subplots(1, 3)
-            axes[0].imshow(I_gt)
-            axes[1].imshow(I_out)
-            axes[2].imshow(diff)
-
-            for ax in axes:
-                ax.set_xticks([])
-                ax.set_yticks([])
-
-            plt.show()
-
-            fig.savefig(f'{self.name_run}/images/{self.config["epoch"]}.png')
-            break
+    
 
 class DefaultResidual(nn.Module):
     def __init__(
@@ -1157,3 +1161,114 @@ class CrossModel(SmallUNet):
             x_2, mask_in = self._single_forward(x_1, x_2, time, mask_in, layer)
 
         return x_2, mask_in    
+    
+from partial_conv import FourierPartialConv2d
+from utils import FourierMultiheadAttention
+
+
+class FourierModel(TrainingPhase):
+    def __init__(self, name_run: str, criterion):
+        super().__init__(name_run, criterion)
+        self.maxpool = lambda x: F.max_pool2d(x, 4, 4)
+        self.upsample = lambda x: F.interpolate(x, scale_factor=4, mode = 'nearest')
+
+        self.hid_act = lambda x: F.relu(x)
+        self.last_act = lambda x: F.sigmoid(x)
+
+        self.fconv1 = FourierPartialConv2d(1, 32, 3, 1, 1) # -> 32, 1024, 1024
+        self.norm1= nn.BatchNorm2d(32) 
+
+        self.fconv2 = FourierPartialConv2d(32, 64, 3, 1, 1)# -> 64, 256, 256 
+        self.norm2 = nn.BatchNorm2d(64)
+        
+        self.fconv3 = FourierPartialConv2d(64, 128, 3, 1, 1)# -> 128, 64, 64 
+        self.norm3 = nn.BatchNorm2d(128)
+
+        self.fconv4 = FourierPartialConv2d(128, 256, 3, 1, 1) # -> 256, 16, 16
+        self.norm4 = nn.BatchNorm2d(256)
+
+        self.fupconv1 = FourierPartialConv2d(256, 128, 3, 1, 1) # -> 128, 64, 64
+        self.upnorm1 = nn.BatchNorm2d(128)
+
+        self.fupconv2 = FourierPartialConv2d(128, 64, 3, 1, 1) # -> 64, 256, 256 
+        self.upnorm2 = nn.BatchNorm2d(64)
+
+        self.fupconv3 = FourierPartialConv2d(64, 32, 3, 1, 1) # ->  32, 1024, 1024
+        self.upnorm3 = nn.BatchNorm2d(32)
+
+        self.upconv4 = PartialConv2d(32, 1, 3, 1, 1) # ->  1, 1024, 1024
+
+        self.attention = FourierMultiheadAttention(256, 8)
+
+    def joint_maxpool(self, x: Tensor, mask_in: Tensor) -> Tuple[Tensor, Tensor]:
+        return self.maxpool(x), self.maxpool(mask_in)
+
+    def joint_upsample(self, x: Tensor, mask_in: Tensor) -> Tuple[Tensor, Tensor]:
+        return self.upsample(x), self.upsample(mask_in)
+
+    def forward(self, x: Tensor, mask_in: Tensor) -> Tuple[Tensor, Tensor]:
+        gt = x.clone()
+        init_mask = mask_in.clone()
+        # First layer
+        x, mask_in = self.fconv1(x, mask_in) # -> 32, 1024, 1024
+        x = self.norm1(x)
+        x_1 = self.hid_act(x)
+        x, mask_in = self.joint_maxpool(x_1, mask_in) #  -> 32, 256, 256
+
+        # Second layer
+        x, mask_in = self.fconv2(x, mask_in) # -> 64, 256, 256
+        x = self.norm2(x)
+        x_2 = self.hid_act(x)
+        x, mask_in = self.joint_maxpool(x_2, mask_in) # -> 64, 64, 64
+
+        # Third layer
+        x, mask_in = self.fconv3(x, mask_in)# -> 128, 64, 64
+        x = self.norm3(x)
+        x_3 = self.hid_act(x)
+        x, mask_in = self.joint_maxpool(x_3, mask_in) # -> 128, 16, 16
+        
+        # Fourth layer
+        x, mask_in = self.fconv4(x, mask_in)# -> 256, 16, 16
+        x = self.norm4(x)
+        x = self.hid_act(x)
+
+        # Fourier attention layer and residual connection
+        
+        x, mask_in = self.joint_upsample(self.attention(x) + x, mask_in)        
+        x, mask_in = self.fupconv1(x, mask_in) # -> 128, 64, 64
+        x += x_3
+        x = self.upnorm1(x)
+        x = self.hid_act(x)
+
+
+        x, mask_in = self.joint_upsample(x, mask_in)        
+        x, mask_in = self.fupconv2(x, mask_in) # -> 64, 256, 256
+        x += x_2
+        x = self.upnorm2(x)
+        x = self.hid_act(x)
+
+
+        x, mask_in = self.joint_upsample(x, mask_in)        
+        x, mask_in = self.fupconv3(x, mask_in) # -> 32, 1024, 1024
+        x += x_1
+        x = self.upnorm3(x)
+        x = self.hid_act(x)
+
+
+        x, mask_in = self.upconv4(x, mask_in)
+        x = self.last_act(x)
+
+        return x * ~init_mask.bool() + gt * init_mask.bool(), mask_in
+
+    def compute_train_loss(self, batch: Tensor) -> Tuple[Dict[str, float], Tensor]:
+        I_gt, M_l_1 = batch
+        I_out, M_l_2 = self(I_gt, M_l_1)
+        args = self.criterion(I_out, I_gt, M_l_1, M_l_2)
+        metrics = {k:v.item() for k, v in zip(self.criterion.labels, args)}
+        return metrics, args[-1]
+            
+    @torch.no_grad()
+    def compute_val_metrics(self, batch: Tensor) -> Dict[str, float]:
+        out, _ = self.compute_train_loss(batch)
+        return out
+    

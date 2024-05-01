@@ -38,3 +38,21 @@ def create_config(name_run: str):
         "optimizer_state_dict": None,
         "scheduler_state_dict": None,
     }
+
+from torch import nn
+from torch import Tensor
+
+class FourierMultiheadAttention(nn.Module):
+    def __init__(self, d_model, n_heads) -> None:
+        super().__init__()
+        self.attention = nn.MultiheadAttention(d_model, n_heads, batch_first=True)
+        self.fft_attention = nn.MultiheadAttention(d_model, n_heads, batch_first=True)
+        self.fft = torch.fft.fftn
+
+    def forward(self, x: Tensor) -> Tensor:
+        b, c, h, w = x.shape
+        fft_x = self.fft(x, dim = (-1, -2))
+        x = x.view(b, c, -1)
+        out, _ = self.attention(x, x, x)
+        out_fft, _ = self.fft_attention(fft_x.real.view(b, c, -1), fft_x.imag.view(b, c, -1), x)
+        return (out + out_fft).view(b, c, h, w)
