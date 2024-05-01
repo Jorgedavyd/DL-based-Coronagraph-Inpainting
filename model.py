@@ -1169,8 +1169,8 @@ from utils import FourierMultiheadAttention
 class FourierModel(TrainingPhase):
     def __init__(self, name_run: str, criterion):
         super().__init__(name_run, criterion)
-        self.maxpool = lambda x: F.max_pool2d(x, 4, 4)
-        self.upsample = lambda x: F.interpolate(x, scale_factor=4, mode = 'nearest')
+        self.maxpool = lambda x: F.max_pool2d(x, 2, 2)
+        self.upsample = lambda x: F.interpolate(x, scale_factor=2, mode = 'nearest')
 
         self.hid_act = lambda x: F.relu(x)
         self.last_act = lambda x: F.sigmoid(x)
@@ -1178,27 +1178,38 @@ class FourierModel(TrainingPhase):
         self.fconv1 = FourierPartialConv2d(1, 32, 3, 1, 1) # -> 32, 1024, 1024
         self.norm1= nn.BatchNorm2d(32) 
 
-        self.fconv2 = FourierPartialConv2d(32, 64, 3, 1, 1)# -> 64, 256, 256 
+        self.fconv2 = FourierPartialConv2d(32, 64, 3, 1, 1)# -> 64, 512, 512 
         self.norm2 = nn.BatchNorm2d(64)
         
-        self.fconv3 = FourierPartialConv2d(64, 128, 3, 1, 1)# -> 128, 64, 64 
+        self.fconv3 = FourierPartialConv2d(64, 128, 3, 1, 1)# -> 128, 256, 256 
         self.norm3 = nn.BatchNorm2d(128)
 
-        self.fconv4 = FourierPartialConv2d(128, 256, 3, 1, 1) # -> 256, 16, 16
+        self.fconv4 = FourierPartialConv2d(128, 256, 3, 1, 1) # -> 256, 128, 128
         self.norm4 = nn.BatchNorm2d(256)
 
-        self.fupconv1 = FourierPartialConv2d(256, 128, 3, 1, 1) # -> 128, 64, 64
-        self.upnorm1 = nn.BatchNorm2d(128)
+        self.fconv5 = FourierPartialConv2d(256, 512, 5, 1, 2) # -> 512, 64, 64
+        self.norm5 = nn.BatchNorm2d(512)
+        
+        self.fconv6 = FourierPartialConv2d(512, 1024, 7, 1, 3) # -> 1024, 32, 32
 
-        self.fupconv2 = FourierPartialConv2d(128, 64, 3, 1, 1) # -> 64, 256, 256 
-        self.upnorm2 = nn.BatchNorm2d(64)
+        self.fupconv1 = FourierPartialConv2d(1024, 512, 7, 1, 3) # -> 512, 32, 32
+        self.upnorm1 = nn.BatchNorm2d(512)
 
-        self.fupconv3 = FourierPartialConv2d(64, 32, 3, 1, 1) # ->  32, 1024, 1024
-        self.upnorm3 = nn.BatchNorm2d(32)
+        self.fupconv2 = FourierPartialConv2d(512, 256, 3, 1, 1) # -> 256, 64, 64 
+        self.upnorm2 = nn.BatchNorm2d(256)
+        
+        self.fupconv3 = FourierPartialConv2d(256, 128, 3, 1, 1) # -> 128, 128, 128
+        self.upnorm3 = nn.BatchNorm2d(128)
 
-        self.upconv4 = PartialConv2d(32, 1, 3, 1, 1) # ->  1, 1024, 1024
+        self.fupconv4 = FourierPartialConv2d(128, 64, 3, 1, 1) # -> 64, 256, 256 
+        self.upnorm4 = nn.BatchNorm2d(64)
 
-        self.attention = FourierMultiheadAttention(256, 8)
+        self.fupconv5 = FourierPartialConv2d(64, 32, 3, 1, 1) # ->  32, 512, 512
+        self.upnorm5 = nn.BatchNorm2d(32)
+
+        self.upconv6 = PartialConv2d(32, 1, 3, 1, 1) # ->  1, 1024, 1024
+
+        self.attention = FourierMultiheadAttention(1024, 8)
 
     def joint_maxpool(self, x: Tensor, mask_in: Tensor) -> Tuple[Tensor, Tensor]:
         return self.maxpool(x), self.maxpool(mask_in)
@@ -1207,55 +1218,86 @@ class FourierModel(TrainingPhase):
         return self.upsample(x), self.upsample(mask_in)
 
     def forward(self, x: Tensor, mask_in: Tensor) -> Tuple[Tensor, Tensor]:
+        #for output
         gt = x.clone()
         init_mask = mask_in.clone()
         # First layer
         x, mask_in = self.fconv1(x, mask_in) # -> 32, 1024, 1024
         x = self.norm1(x)
         x_1 = self.hid_act(x)
-        x, mask_in = self.joint_maxpool(x_1, mask_in) #  -> 32, 256, 256
+        x, mask_in = self.joint_maxpool(x_1, mask_in) #  -> 32, 512, 512
 
         # Second layer
-        x, mask_in = self.fconv2(x, mask_in) # -> 64, 256, 256
+        x, mask_in = self.fconv2(x, mask_in) # -> 64, 512, 512
         x = self.norm2(x)
         x_2 = self.hid_act(x)
-        x, mask_in = self.joint_maxpool(x_2, mask_in) # -> 64, 64, 64
+        x, mask_in = self.joint_maxpool(x_2, mask_in) # -> 64, 256, 256
 
         # Third layer
-        x, mask_in = self.fconv3(x, mask_in)# -> 128, 64, 64
+        x, mask_in = self.fconv3(x, mask_in)# -> 128, 256, 256
         x = self.norm3(x)
         x_3 = self.hid_act(x)
-        x, mask_in = self.joint_maxpool(x_3, mask_in) # -> 128, 16, 16
+        x, mask_in = self.joint_maxpool(x_3, mask_in) # -> 128, 128, 128
         
         # Fourth layer
-        x, mask_in = self.fconv4(x, mask_in)# -> 256, 16, 16
+        x, mask_in = self.fconv4(x, mask_in)# -> 256, 128, 128
         x = self.norm4(x)
-        x = self.hid_act(x)
+        x_4 = self.hid_act(x)
+        x, mask_in = self.joint_maxpool(x_4, mask_in) # -> 256, 64, 64
 
-        # Fourier attention layer and residual connection
+        # Fifth layer
+        x, mask_in = self.fconv5(x, mask_in)# -> 512, 64, 64
+        x = self.norm5(x)
+        x_5 = self.hid_act(x)
+        x, mask_in = self.joint_maxpool(x_5, mask_in) # -> 512, 32, 32
+
+        # Sixth layer
+        x, mask_in = self.fconv6(x, mask_in)# -> 1024, 32, 32
+
         
-        x, mask_in = self.joint_upsample(self.attention(x) + x, mask_in)        
-        x, mask_in = self.fupconv1(x, mask_in) # -> 128, 64, 64
-        x += x_3
+        # Fourier attention layer and residual connection
+        x, mask_in = self.fupconv1(x + self.attention(x), mask_in) # -> 512, 32, 32
         x = self.upnorm1(x)
         x = self.hid_act(x)
 
+        x, mask_in = self.joint_upsample(x, mask_in) # -> 512, 64, 64    
 
-        x, mask_in = self.joint_upsample(x, mask_in)        
-        x, mask_in = self.fupconv2(x, mask_in) # -> 64, 256, 256
-        x += x_2
+        x += x_5
+
+        x, mask_in = self.fupconv2(x, mask_in) # -> 256, 64, 64
         x = self.upnorm2(x)
         x = self.hid_act(x)
 
+        x, mask_in = self.joint_upsample(x, mask_in) # -> 256, 128, 128
 
-        x, mask_in = self.joint_upsample(x, mask_in)        
-        x, mask_in = self.fupconv3(x, mask_in) # -> 32, 1024, 1024
-        x += x_1
+        x += x_4
+
+        x, mask_in = self.fupconv3(x, mask_in) # -> 512, 128, 128
         x = self.upnorm3(x)
         x = self.hid_act(x)
 
+        x, mask_in = self.joint_upsample(x, mask_in) # -> 512, 256, 256    
+        
+        x += x_3
 
-        x, mask_in = self.upconv4(x, mask_in)
+        x, mask_in = self.fupconv4(x, mask_in) # -> 512, 128, 128
+        x = self.upnorm4(x)
+        x = self.hid_act(x)
+
+        x, mask_in = self.joint_upsample(x, mask_in) # -> 512, 256, 256    
+        
+        x += x_2
+        
+        x, mask_in = self.fupconv5(x, mask_in) # -> 512, 128, 128
+        x = self.upnorm5(x)
+        x = self.hid_act(x)
+
+        x, mask_in = self.joint_upsample(x, mask_in) # -> 512, 256, 256    
+        
+        x += x_1
+
+        x, mask_in = self.upconv6(x, mask_in)
+        
         x = self.last_act(x)
 
         return x * ~init_mask.bool() + gt * init_mask.bool(), mask_in
