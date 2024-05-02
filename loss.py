@@ -3,11 +3,15 @@ from typing import Iterable, List, Dict, Callable, Tuple, Union
 import torch
 from torch import Tensor
 from torchvision.models import vgg19, VGG19_Weights
+
+
 def total_variation_loss(image):
     # shift one pixel and get difference (for both x and y direction)
-    loss = torch.mean(torch.abs(image[:, :, :, :-1] - image[:, :, :, 1:])) + \
-        torch.mean(torch.abs(image[:, :, :-1, :] - image[:, :, 1:, :]))
+    loss = torch.mean(torch.abs(image[:, :, :, :-1] - image[:, :, :, 1:])) + torch.mean(
+        torch.abs(image[:, :, :-1, :] - image[:, :, 1:, :])
+    )
     return loss
+
 
 class FeatureExtractor(nn.Module):
     def __init__(self, layers: Iterable = [4, 9, 18]) -> None:
@@ -32,6 +36,7 @@ class FeatureExtractor(nn.Module):
                     break
         return features
 
+
 class NewInpaintingLoss(nn.Module):
     """
     # Inpainting Loss
@@ -43,14 +48,20 @@ class NewInpaintingLoss(nn.Module):
         self.alpha: Iterable = alpha
         self.fe = FeatureExtractor()
 
-        self.labels = ['Pixel Loss', 'Perceptual Loss', 'Style Loss', 'Total variance', 'Overall']
+        self.labels = [
+            "Pixel Loss",
+            "Perceptual Loss",
+            "Style Loss",
+            "Total variance",
+            "Overall",
+        ]
         self.factors = {
-            'Pixel inner': alpha[0],
-            'Pixel diff': alpha[1],
-            'Perceptual': alpha[2],
-            'Style inner': alpha[3],
-            'Style diff': alpha[4],
-            'Total variance': alpha[5]
+            "Pixel inner": alpha[0],
+            "Pixel diff": alpha[1],
+            "Perceptual": alpha[2],
+            "Style inner": alpha[3],
+            "Style diff": alpha[4],
+            "Total variance": alpha[5],
         }
         sample_tensor: Tensor = torch.randn(32, 1, 1024, 1024)
         self.dim_per_layer: List[List[int]] = []
@@ -65,7 +76,9 @@ class NewInpaintingLoss(nn.Module):
         self.F_p: Tensor = Tensor(F_p)
         self.N_phi_p: Tensor = Tensor(N_phi_p)
 
-    def forward(self, I_out: Tensor, I_gt: Tensor, M_l_1: Tensor, M_l_2: Tensor) -> Tuple[Tensor, Tensor, Tensor]:
+    def forward(
+        self, I_out: Tensor, I_gt: Tensor, M_l_1: Tensor, M_l_2: Tensor
+    ) -> Tuple[Tensor, Tensor, Tensor]:
         # Getting the batch_size (b), number of channels (c), heigh (h) and width (w)
         b, c, h, w = I_out.shape
         # N_{I_{gt}} = C \times H \times W
@@ -74,15 +87,15 @@ class NewInpaintingLoss(nn.Module):
         diff: Tensor = I_out - I_gt
         # for diff terms of the loss function
         mathcal_M: Tensor = M_l_1.bool() ^ M_l_2.bool()
-        
+
         L_inner: Tensor = torch.norm(~M_l_2.bool() * diff, p=1)
         L_diff: Tensor = torch.norm(mathcal_M * diff, p=1)
-        L_pixel: Tensor = (1/N_I_gt) * (
+        L_pixel: Tensor = (1 / N_I_gt) * (
             self.alpha[0] * L_inner + self.alpha[1] * L_diff
         )
 
-        psi_out_mathcal_masked: List[Tensor] = self.fe(I_out*mathcal_M)
-        psi_gt_mathcal_masked: List[Tensor] = self.fe(I_gt*mathcal_M)
+        psi_out_mathcal_masked: List[Tensor] = self.fe(I_out * mathcal_M)
+        psi_gt_mathcal_masked: List[Tensor] = self.fe(I_gt * mathcal_M)
 
         psi_masked_out: List[Tensor] = self.fe(I_out * ~M_l_2.bool())
         psi_masked_gt: List[Tensor] = self.fe(I_gt * ~M_l_2.bool())
@@ -95,7 +108,10 @@ class NewInpaintingLoss(nn.Module):
                         torch.norm(phi_out - phi_gt, p=1)
                         + torch.norm(psi_out_m - psi_gt_m, p=1)
                         for phi_out, phi_gt, psi_out_m, psi_gt_m in zip(
-                            psi_out_mathcal_masked, psi_gt_mathcal_masked, psi_masked_out, psi_masked_gt
+                            psi_out_mathcal_masked,
+                            psi_gt_mathcal_masked,
+                            psi_masked_out,
+                            psi_masked_gt,
                         )
                     ]
                 )
@@ -130,10 +146,18 @@ class NewInpaintingLoss(nn.Module):
             )
             / self.F_p
         ).sum()
-        
-        L_tv = torch.mean(torch.abs(I_out[:, :, :, :-1] - I_out[:, :, :, 1:])) + torch.mean(torch.abs(I_out[:, :, :-1, :] - I_out[:, :, 1:, :]))
 
-        return L_pixel, L_perceptual, L_style, L_tv, L_pixel + L_perceptual + L_style + L_tv 
+        L_tv = torch.mean(
+            torch.abs(I_out[:, :, :, :-1] - I_out[:, :, :, 1:])
+        ) + torch.mean(torch.abs(I_out[:, :, :-1, :] - I_out[:, :, 1:, :]))
+
+        return (
+            L_pixel,
+            L_perceptual,
+            L_style,
+            L_tv,
+            L_pixel + L_perceptual + L_style + L_tv,
+        )
 
 
 class OldInpaintingLoss(nn.Module):
@@ -153,7 +177,10 @@ class OldInpaintingLoss(nn.Module):
 
         self.F_p: Tensor = Tensor(F_p)
         self.N_phi_p: Tensor = Tensor(N_phi_p)
-    def forward(self, I_out: Tensor, I_gt: Tensor, M_l_1: Tensor, M_l_2: Tensor) -> Tuple[Tensor, Tensor, Tensor]:
+
+    def forward(
+        self, I_out: Tensor, I_gt: Tensor, M_l_1: Tensor, M_l_2: Tensor
+    ) -> Tuple[Tensor, Tensor, Tensor]:
         # Getting the batch_size (b), number of channels (c), heigh (h) and width (w)
         b, c, h, w = I_out.shape
         # N_{I_{gt}} = C \times H \times W
@@ -168,7 +195,7 @@ class OldInpaintingLoss(nn.Module):
         L_inner: Tensor = torch.norm(~M_l_2.bool() * diff, p=1)
         L_diff: Tensor = torch.norm(mathcal_M * diff, p=1)
 
-        L_pixel: Tensor = (1/N_I_gt) * (
+        L_pixel: Tensor = (1 / N_I_gt) * (
             self.alpha[0] * L_outter + self.alpha[1] * L_inner + self.alpha[2] * L_diff
         )
 
@@ -230,7 +257,8 @@ class OldInpaintingLoss(nn.Module):
         # Total variance loss
 
         return L_pixel, L_perceptual, L_style
-        
+
+
 class UNetLoss(nn.Module):
     def __init__(self, alpha: Iterable = [1, 6, 0.05, 110, 120]) -> None:
         super().__init__()
@@ -248,7 +276,10 @@ class UNetLoss(nn.Module):
 
         self.F_p: Tensor = Tensor(F_p)
         self.N_phi_p: Tensor = Tensor(N_phi_p)
-    def forward(self, I_out: Tensor, I_gt: Tensor, mask_in: Tensor) -> Tuple[Tensor, Tensor, Tensor]:
+
+    def forward(
+        self, I_out: Tensor, I_gt: Tensor, mask_in: Tensor
+    ) -> Tuple[Tensor, Tensor, Tensor]:
         # Getting the batch_size (b), number of channels (c), heigh (h) and width (w)
         b, c, h, w = I_out.shape
         # N_{I_{gt}} = C \times H \times W
@@ -260,7 +291,7 @@ class UNetLoss(nn.Module):
         L_outter: Tensor = torch.norm(mask_in * diff, p=1)
         L_inner: Tensor = torch.norm(~mask_in.bool() * diff, p=1)
 
-        L_pixel: Tensor = (1/N_I_gt) * (
+        L_pixel: Tensor = (1 / N_I_gt) * (
             self.alpha[0] * L_outter + self.alpha[1] * L_inner
         )
 
@@ -317,6 +348,7 @@ class UNetLoss(nn.Module):
         ).sum()
 
         return L_pixel, L_perceptual, L_style
+
 
 class CoronagraphConstraint(nn.Module):
     def __init__(self, lambd: Tensor) -> None:

@@ -63,9 +63,10 @@ def create_mask():
     height = m * 32
 
     mask = torch.ones(1024, 1024)
-    mask[top:top+height, left:left+width] = 0
+    mask[top : top + height, left : left + width] = 0
 
     return mask
+
 
 class NormalizeInverse(tt.Normalize):
     """
@@ -95,7 +96,11 @@ class CoronagraphDataset(Dataset):
         # main transform
         self.transform = tt.Compose(
             [
-                tt.Lambda(lambda x: ImageNormalize(stretch = HistEqStretch(x[np.isfinite(x)]))(x)),
+                tt.Lambda(
+                    lambda x: ImageNormalize(stretch=HistEqStretch(x[np.isfinite(x)]))(
+                        x
+                    )
+                ),
                 tt.ToTensor(),
                 tt.Resize((1024, 1024), antialias=True),
             ]
@@ -113,29 +118,43 @@ class CoronagraphDataset(Dataset):
 
         return img.type(torch.float32), mask
 
+
 class CrossDataset(CoronagraphDataset):
     def __init__(self, tool):
         super().__init__(tool)
+
     def __len__(self) -> int:
         return super().__len__() - 1
+
     def __getitem__(self, idx: int) -> Dict[str, Tensor]:
         x1_path = self.image_paths[idx]
         x2_path = self.image_paths[idx + 1]
 
         x_1: np.array = fits.getdata(x1_path).astype(np.float32)
-        time_1: float = datetime.strptime(fits.getheader(x1_path)['date-obs'].split('T')[-1], '%H:%M:%S.%f')
+        time_1: float = datetime.strptime(
+            fits.getheader(x1_path)["date-obs"].split("T")[-1], "%H:%M:%S.%f"
+        )
 
         x_2: np.array = fits.getdata(x2_path).astype(np.float32)
-        time_2: float = datetime.strptime(fits.getheader(x2_path)['date-obs'].split('T')[-1], '%H:%M:%S.%f')
+        time_2: float = datetime.strptime(
+            fits.getheader(x2_path)["date-obs"].split("T")[-1], "%H:%M:%S.%f"
+        )
 
         x_1: Tensor = self.transform(x_1).type(torch.float32)
         x_2: Tensor = self.transform(x_2).type(torch.float32)
 
-        time = Tensor([(time_2 - time_1)/timedelta(minutes = 24)]).type(torch.float32).unsqueeze(0).unsqueeze(0)
+        time = (
+            Tensor([(time_2 - time_1) / timedelta(minutes=24)])
+            .type(torch.float32)
+            .unsqueeze(0)
+            .unsqueeze(0)
+        )
 
         mask = create_mask().unsqueeze(0).type(torch.float32)
 
         return x_1, x_2, time, mask
+
+
 @dataclass
 class Data:
     tool: str
@@ -148,13 +167,12 @@ class Data:
         await self.__downloader(scrap_date_list)
 
     def level_1(self):
-        paths = [os.path.join(self.path, self.tool, filename) for filename in sorted(os.listdir(os.path.join(self.path, self.tool)))]
-        level_1(
-            paths,
-            self.path,
-            'fits'
-        )
-            
+        paths = [
+            os.path.join(self.path, self.tool, filename)
+            for filename in sorted(os.listdir(os.path.join(self.path, self.tool)))
+        ]
+        level_1(paths, self.path, "fits")
+
 
 if __name__ == "__main__":
     downloader = Data("c3")
