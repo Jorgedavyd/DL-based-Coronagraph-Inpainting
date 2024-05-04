@@ -347,7 +347,11 @@ class FourierPartial(L.LightningModule):
     def __init__(self, criterion, hyperparams):
         super().__init__()
         self.criterion = criterion
-        self.save_hyperparameters(hyperparams)
+        
+        self.save_hyperparameters({
+            f'{base}_{arg}': dict_[arg]  for base, dict_ in zip(['encoder', 'decoder'], hyperparams) for arg in dict_
+        }.update(self.criterion.factors))
+
         self.hyperparams = hyperparams
         
         self.maxpool = lambda x: F.max_pool2d(x, 2, 2)
@@ -515,7 +519,7 @@ class FourierVAE(L.LightningModule):
         
         self.save_hyperparameters({
             f'{base}_{arg}': dict_[arg]  for base, dict_ in zip(['encoder', 'decoder'], hyperparams) for arg in dict_
-        })
+        }.update(self.criterion.factors))
 
         self.hyperparams = hyperparams
         self.fft = fftn
@@ -584,7 +588,7 @@ class FourierVAE(L.LightningModule):
         mu = self.mu_fc(out).view(b, c, h, w)  # mu: b, c, h, w (b, 1, 32, 32)
         std = torch.exp(0.5 * logvar)
         eps = torch.randn(b, in_channels, h, w, device="cuda")
-        return mu + eps * std
+        return mu + eps * std, mu, logvar
 
     def _joint_maxpool(self, Re: Tensor, Im: Tensor) -> Tuple[Tensor, Tensor]:
         return self.maxpool(Re) + 1j * self.maxpool(Im)
@@ -606,7 +610,7 @@ class FourierVAE(L.LightningModule):
         weight_6 = self.fconv6(out)  # -> 1, 32,32
         out = self.ifft(out).real  # -> Real
 
-        out = self.reparametrization(out, 1024)  # -> 1024, 32, 32
+        out, mu, logvar = self.reparametrization(out, 1024)  # -> 1024, 32, 32
 
         z = self.upconv1(out, weight_6)  # -> 512, 32, 32
         z = self.hid_act(z)
@@ -627,12 +631,12 @@ class FourierVAE(L.LightningModule):
         z = self.hid_act(z)
         z = self.fc(z)
 
-        return z
-    
+        return z*~mask_in.bool() + x*mask_in, mu, logvar
+
     def training_step(self, batch: Tensor) -> Tensor:
-        I_gt, M_l_1 = batch
-        I_out, M_l_2 = self(I_gt, M_l_1)
-        args = self.criterion(I_out, I_gt, M_l_1, M_l_2)
+        I_gt, mask = batch
+        I_out, mu, logvar = self(I_gt, mask)
+        args = self.criterion(I_out, I_gt, mask, mu, logvar)
         metrics = {k: v.item() for k, v in zip(self.criterion.labels, args)}
         self.log_dict(metrics, prog_bar=True, enable_graph=True)
         return args[-1]

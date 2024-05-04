@@ -108,10 +108,10 @@ class NewInpaintingLoss(nn.Module):
                         torch.norm(phi_out - phi_gt, p=1)
                         + torch.norm(psi_out_m - psi_gt_m, p=1)
                         for phi_out, phi_gt, psi_out_m, psi_gt_m in zip(
-                            psi_out_mathcal_masked,
-                            psi_gt_mathcal_masked,
                             psi_masked_out,
                             psi_masked_gt,
+                            psi_out_mathcal_masked,
+                            psi_gt_mathcal_masked,
                         )
                     ]
                 )
@@ -147,9 +147,9 @@ class NewInpaintingLoss(nn.Module):
             / self.F_p
         ).sum()
 
-        L_tv = torch.mean(
+        L_tv = self.alpha[5] * (torch.mean(
             torch.abs(I_out[:, :, :, :-1] - I_out[:, :, :, 1:])
-        ) + torch.mean(torch.abs(I_out[:, :, :-1, :] - I_out[:, :, 1:, :]))
+        ) + torch.mean(torch.abs(I_out[:, :, :-1, :] - I_out[:, :, 1:, :])))
 
         return (
             L_pixel,
@@ -158,7 +158,7 @@ class NewInpaintingLoss(nn.Module):
             L_tv,
             L_pixel + L_perceptual + L_style + L_tv,
         )
-    
+
 class FourierModelCriterion(nn.Module):
     """
     # Inpainting Loss
@@ -199,10 +199,32 @@ class FourierModelCriterion(nn.Module):
 
         self.F_p: Tensor = Tensor(F_p)
         self.N_phi_p: Tensor = Tensor(N_phi_p)
+        self.log_scale = nn.Parameter(torch.Tensor([0.0]))
+    def gaussian_likelihood(self, mean, logscale, sample):
+        scale = torch.exp(logscale)
+        dist = torch.distributions.Normal(mean, scale)
+        log_pxz = dist.log_prob(sample)
+        return log_pxz.sum(dim=(1, 2, 3))
 
+    def kl_divergence(self, z, mu, std):
+        # --------------------------
+        # Monte carlo KL divergence
+        # --------------------------
+        # 1. define the first two probabilities (in this case Normal for both)
+        p = torch.distributions.Normal(torch.zeros_like(mu), torch.ones_like(std))
+        q = torch.distributions.Normal(mu, std)
+
+        # 2. get the probabilities from the equation
+        log_qzx = q.log_prob(z)
+        log_pz = p.log_prob(z)
+
+        # kl
+        kl = (log_qzx - log_pz)
+        kl = kl.sum(dim = (-1, -2, -3))
+        return kl
+    
     def forward(
-        self, I_out: Tensor, I_gt: Tensor, mask: Tensor
-    ) -> Tuple[Tensor, Tensor, Tensor]:
+        self, I_out: Tensor, I_gt: Tensor, mask: Tensor, mean: Tensor, log_var: Tensor) -> Tuple[Tensor, Tensor, Tensor]:
         # Getting the batch_size (b), number of channels (c), heigh (h) and width (w)
         b, c, h, w = I_out.shape
         # N_{I_{gt}} = C \times H \times W
@@ -261,7 +283,10 @@ class FourierModelCriterion(nn.Module):
             torch.abs(I_out[:, :, :, :-1] - I_out[:, :, :, 1:])
         ) + torch.mean(torch.abs(I_out[:, :, :-1, :] - I_out[:, :, 1:, :]))
 
-        L_elbo = self.alpha[4] * (F.binary_cross_entropy(I_out, I_gt, reduction = 'sum') - F.kl_div(I_out, I_gt, reduction = 'sum'))
+        # elbo
+        L_elbo = self.alpha[4] *(F.binary_cross_entropy(I_out, I_gt, reduction='sum') + 
+                                 (- 0.5 * torch.sum(1+ log_var - mean.pow(2) - log_var.exp())))
+
         return (
             L_pixel,
             L_perceptual,
