@@ -42,9 +42,9 @@ class InpaintingBase(LightningModule):
         ssim = self.ssim(y, x)
 
         self.log_dict({
-            "Validation/Loss": args[-1],
-            "Validation/Peak Signal": peak_signal,
-            "Validation/Structural Similarity Index Measure": ssim
+            "val_loss": args[-1],
+            "val_peak_signal": peak_signal,
+            "val_ssim": ssim
         }, prog_bar = True)
 
 class VAEbase(LightningModule):
@@ -72,9 +72,9 @@ class VAEbase(LightningModule):
         ssim = self.ssim(out, x)
 
         self.log_dict({
-            "Validation/Loss": args[-1],
-            "Validation/Peak Signal": peak_noise,
-            "Validation/Structural Similarity Index Measure": ssim
+            "val_loss": args[-1],
+            "val_peak_signal": peak_noise,
+            "val_ssim": ssim
         })
 
 class SingleLayer(LightningModule):
@@ -809,19 +809,44 @@ class DefaultResidual(nn.Module):
 
         return I_out + x, mask_in
     
-
+from loss import FourierModelCriterion
 # UNet like architectures with residual connections
-class FourierPartial(LightningModule):
-    def __init__(self, criterion, hyperparams):
+class FourierPartial(InpaintingBase):
+    def __init__(
+            self,
+            encoder_lr: float,
+            encoder_wd: float,
+            decoder_lr: float,
+            decoder_wd: float,
+            alpha_1: float, 
+            alpha_2: float,
+            alpha_3: float,
+            alpha_4: float,
+            alpha_5: float,
+            alpha_6: float,
+            alpha_7: float
+    ):
         super().__init__()
-        self.criterion = criterion
-        
-        self.save_hyperparameters({
-            f'{base}_{arg}': dict_[arg]  for base, dict_ in zip(['encoder', 'decoder'], hyperparams) for arg in dict_
-        }.update(self.criterion.factors))
 
-        self.hyperparams = hyperparams
+        self.encoder_lr = encoder_lr
+        self.encoder_wd = encoder_wd
+        self.decoder_lr = decoder_lr
+        self.decoder_wd = decoder_wd
+
+        self.alpha_1 = alpha_1
+        self.alpha_2 = alpha_2
+        self.alpha_3 = alpha_3
+        self.alpha_4 = alpha_4
+        self.alpha_5 = alpha_5
+        self.alpha_6 = alpha_6
+        self.alpha_7 = alpha_7
+
+        self.criterion = FourierModelCriterion(
+            [alpha_1, alpha_2, alpha_3, alpha_4, alpha_5, alpha_6, alpha_7]
+        )
         
+        self.save_hyperparameters()
+
         self.maxpool = lambda x: F.max_pool2d(x, 2, 2)
         self.upsample = lambda x: F.interpolate(x, scale_factor=2, mode="nearest")
 
@@ -953,21 +978,6 @@ class FourierPartial(LightningModule):
         x = self.last_act(x)
 
         return x * ~init_mask.bool() + gt * init_mask.bool(), mask_in
-
-    def training_step(self, batch: Tensor) -> Tensor:
-        I_gt, M_l_1 = batch
-        I_out, M_l_2 = self(I_gt, M_l_1)
-        args = self.criterion(I_out, I_gt, M_l_1, M_l_2)
-        metrics = {k: v.item() for k, v in zip(self.criterion.labels, args)}
-        self.log_dict(metrics, prog_bar=True)
-        return args[-1]
-    
-    def validation_step(self, batch) -> Tensor:
-        I_gt, M_l_1 = batch
-        I_out, M_l_2 = self(I_gt, M_l_1)
-        args = self.criterion(I_out, I_gt, M_l_1, M_l_2)
-        self.log('val_loss', args[-1], True)
-        return args[-1]
         
     def configure_optimizers(self):
         encoder_param_group = defaultdict(list)
@@ -980,8 +990,8 @@ class FourierPartial(LightningModule):
                 decoder_param_group['params'].append(param)
 
         optimizer = torch.optim.Adam([
-            {'params': encoder_param_group['params'], **self.hyperparams[0]},
-            {'params': decoder_param_group['params'], **self.hyperparams[1]}
+            {'params': encoder_param_group['params'], 'lr': self.encoder_lr, 'weight_decay':self.encoder_wd},
+            {'params': decoder_param_group['params'], 'lr': self.decoder_lr, 'weight_decay':self.decoder_wd}
         ])
 
         return optimizer
