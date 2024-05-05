@@ -12,7 +12,6 @@ def total_variation_loss(image):
     )
     return loss
 
-
 class FeatureExtractor(nn.Module):
     def __init__(self, layers: Iterable = [4, 9, 18]) -> None:
         super().__init__()
@@ -35,7 +34,6 @@ class FeatureExtractor(nn.Module):
                 if name == str(18):
                     break
         return features
-
 
 class NewInpaintingLoss(nn.Module):
     """
@@ -296,7 +294,6 @@ class FourierModelCriterion(nn.Module):
             L_pixel + L_perceptual + L_style + L_tv + L_elbo,
         )
 
-
 class OldInpaintingLoss(nn.Module):
     def __init__(self, alpha: Iterable = [4, 6, 4, 0.05, 110, 120, 110]) -> None:
         super().__init__()
@@ -395,7 +392,6 @@ class OldInpaintingLoss(nn.Module):
 
         return L_pixel, L_perceptual, L_style
 
-
 class UNetLoss(nn.Module):
     def __init__(self, alpha: Iterable = [1, 6, 0.05, 110, 120]) -> None:
         super().__init__()
@@ -485,7 +481,6 @@ class UNetLoss(nn.Module):
         ).sum()
 
         return L_pixel, L_perceptual, L_style
-
 
 class CoronagraphConstraint(nn.Module):
     def __init__(self, lambd: Tensor) -> None:

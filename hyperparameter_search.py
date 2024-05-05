@@ -9,7 +9,7 @@ from torch.utils.data import DataLoader
 from argparse import ArgumentParser
 from typing import List, Dict
 from loss import NewInpaintingLoss
-from fourier import FourierPartial
+from models import FourierVAE, FourierPartial
 from data import CoronagraphDataset
 from torch.utils.data import random_split
 import json

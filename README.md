@@ -1,9 +1,9 @@
 [![license](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![code-style](https://img.shields.io/badge/code%20style-black-000000.svg)](https://github.com/psf/black)
 
-# Coronagraph Inpainting - Deep Learning approach
+# Coronagraph Inpainting
 The coronagraph data calibration routine in [SolarSoft](https://www.lmsal.com/solarsoft/) employs a fuzzy algorithm to generate a level 1 FITS file, addressing missing data holes. This project endeavors to introduce a novel deep learning methodology, leveraging [Partial Convolutions](https://arxiv.org/abs/1804.07723), to effectively address typical manifestations of data loss in coronagraphic imagery. By harnessing the capabilities of [Partial Convolutions](https://arxiv.org/abs/1804.07723), this approach aims to enhance the robustness and efficiency of data restoration processes.\
-## Approach
+## Partial Convolutions
 To adapt the backbone's architecture for coronagraph inpainting, understanding the nature of information loss is crucial. We deal with squared missing holes of size (32,32), which can compound into larger ones. We aim to enhance partial convolution efforts by comprehensively understanding the constraints of our problem.
 
 ### Convolution:
@@ -23,6 +23,10 @@ $$
 
 ### New proposal:
 Even though this approach achieves state-of-the-art performance, larger information loss chunks are not very well inpainted. To address this for our application, we'll make a network trainable by parts. This is, constantly going back to the number of input channels and evaluating the loss between the original image masked with the last mask and the output of the network. This adaptive loss approach ensures that the missing holes are being filled from the edges to the center.
+
+## Fourier Variational Autoencoder
+
+## Fourier based Partial Convolutions
 
 ## Instalation
 

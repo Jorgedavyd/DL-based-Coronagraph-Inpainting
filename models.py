@@ -1,457 +1,87 @@
 from typing import Tuple, Union, List, Dict, Any, Callable, Optional, Iterable
-from partial_conv import PartialConv2d
+from utils import PartialConv2d, _FourierConv, FourierMultiheadAttention, FourierPartialConv2d, ResidualFourierConvTranspose2d
 from torch import Tensor
 from torch import nn
 from collections import defaultdict
-from torch.utils.tensorboard import SummaryWriter
-import torchmetrics.functional as f
+from loss import NewInpaintingLoss
+from torch.fft import fftn, ifftn
 import torch.nn.functional as F
-from tqdm import tqdm
 import torch
-import os
-import matplotlib.pyplot as plt
 import numpy as np
 from astropy.visualization import HistEqStretch, ImageNormalize
 import matplotlib.pyplot as plt
-from copy import deepcopy
-from utils import create_config
+from lightning import LightningModule
+from torchmetrics.image import PeakSignalNoiseRatio, StructuralSimilarityIndexMeasure
 
+class InpaintingBase(LightningModule):
 
-def get_lr(optimizer):
-    for param_group in optimizer.param_groups:
-        return param_group["lr"]
+    peak_signal = PeakSignalNoiseRatio()
+    ssim = StructuralSimilarityIndexMeasure()
 
+    def training_step(self, batch) -> Tensor:
+        x, mask_in = batch
+        y, mask_out = self(x, mask_in)
 
-class TrainingPhase(nn.Module):
-    def __init__(self, name_run: str, criterion) -> None:
+        args = self.criterion(y, x, mask_in, mask_out)
+
+        self.log_dict(
+            {
+                k:v for k,v in zip(self.criterion.labels, args)
+            }
+        )
+
+        return args[-1]
+    
+    def validation_step(self, batch) -> Tensor:
+        x, mask_in = batch 
+        y, mask_out = self(x, mask_in)
+
+        args = self.criterion(y, x, mask_in, mask_out)
+
+        peak_signal = self.peak_signal(y, x)
+        ssim = self.ssim(y, x)
+
+        self.log_dict({
+            "Validation/Loss": args[-1],
+            "Validation/Peak Signal": peak_signal,
+            "Validation/Structural Similarity Index Measure": ssim
+        }, prog_bar = True)
+
+class VAEbase(LightningModule):
+    peak_signal = PeakSignalNoiseRatio()
+    ssim = StructuralSimilarityIndexMeasure()
+    
+    def training_step(self, batch) -> Tensor:
+        x, mask_in = batch
+        out = self(x, mask_in)
+
+        args = self.criterion(out, x, mask_in)
+
+        self.log_dict({k:v for k,v in zip(self.criterion.labels, args)})
+
+        return args[-1]
+    
+    def validation_step(self, batch) -> Tensor:
+        x, mask_in = batch
+        out = self(x, mask_in)
+
+        args = self.criterion(out, x, mask_in)
+
+        peak_noise = self.peak_signal(out, x)
+
+        ssim = self.ssim(out, x)
+
+        self.log_dict({
+            "Validation/Loss": args[-1],
+            "Validation/Peak Signal": peak_noise,
+            "Validation/Structural Similarity Index Measure": ssim
+        })
+
+class SingleLayer(LightningModule):
+
+    def __init__(self, res_arch: Tuple[int, ...], criterion_args):
         super().__init__()
-        self.name_run = name_run
-        self.config = create_config(name_run)
-        # Tensorboard writer
-        self.writer: SummaryWriter = SummaryWriter(f"{name_run}")
-        self.name: str = name_run
-        self.criterion = criterion
-        # History of changes
-        self.train_epoch: List[List[int]] = []
-        self.val_epoch: List[List[int]] = []
-        self.lr_epoch: Dict[str, List[float]] = defaultdict(list)
-        self.num_runs: int = 0
-        os.makedirs(f"{self.name_run}/images/", exist_ok=True)
-
-    @torch.no_grad()
-    def batch_metrics(self, metrics: dict, card: str) -> None:
-
-        if card == "Training" or "Training" in card.split("/"):
-            self.train()
-            mode = "Training"
-        elif card == "Validation" or "Validation" in card.split("/"):
-            self.eval()
-            mode = "Validation"
-        else:
-            raise ValueError(
-                f"{card} is not a valid card, it should at least have one of these locations: [Validation, Training]"
-            )
-
-        self.writer.add_scalars(
-            f"{card}/metrics",
-            metrics,
-            (
-                self.config["global_step_train"]
-                if mode == "Training"
-                else self.config["global_step_val"]
-            ),
-        )
-        self.writer.flush()
-
-        if mode == "Training":
-            self.train_epoch.append(list(metrics.values()))
-        elif mode == "Validation":
-            self.val_epoch.append(list(metrics.values()))
-
-    @torch.no_grad()
-    def validation_step(self, batch) -> None:
-        metrics = self.compute_val_metrics(batch)
-        self.batch_metrics(metrics, "Validation")
-        self.config["global_step_val"] += 1
-
-    def training_step(self, batch) -> None:
-        # Compute loss and metrics
-        metrics, loss = self.compute_train_loss(batch)
-        # Write metrics to TensorBoard
-        if metrics is not None:
-            self.batch_metrics(metrics, "Training")
-        # Backpropagation
-        loss.backward()
-        # Gradient clipping
-        if self.grad_clip:
-            for grad_clip, params in zip(self.grad_clip, self.params):
-                nn.utils.clip_grad_value_(params, grad_clip)
-        # Optimizer and scheduler steps
-        for optimizer, scheduler in zip(self.optimizer, self.scheduler):
-            optimizer.step()
-            optimizer.zero_grad()
-            if scheduler:
-                for param_group in optimizer.param_groups:
-                    lr = param_group["lr"]
-                    idx = self.optimizer.index(optimizer)
-                    self.lr_epoch[f"{optimizer.__class__.__name__}_{idx}"].append(lr)
-                    self.writer.add_scalars(
-                        "Training",
-                        {f"lr_{optimizer.__class__.__name__}_{idx}": lr},
-                        self.config["global_step_train"],
-                    )
-                    scheduler.step()
-        # Increment global step
-        self.config["global_step_train"] += 1
-        self.writer.flush()
-
-    @torch.no_grad()
-    def end_of_epoch(self) -> None:
-        train_metrics = Tensor(self.train_epoch).mean(dim=-1)
-        val_metrics = Tensor(self.val_epoch).mean(dim=-1)
-        lr_epoch = {
-            key: Tensor(value).mean().item() for key, value in self.lr_epoch.items()
-        }
-
-        train_metrics = {
-            key: value for key, value in zip(self.criterion.labels, train_metrics)
-        }
-        val_metrics = {
-            key: value for key, value in zip(self.criterion.labels, val_metrics)
-        }
-
-        self.writer.add_scalars(
-            "Training/Epoch", train_metrics, global_step=self.config["epoch"]
-        )
-        self.writer.add_scalars(
-            "Validation/Epoch", val_metrics, global_step=self.config["epoch"]
-        )
-
-        hparams = {"Epochs": self.config["epoch"], "Batch Size": self.batch_size}
-        # Criterion factors
-        hparams.update(self.criterion.factors)
-        # Learning rate
-        hparams.update(lr_epoch)
-        # Weight decay
-        hparams.update(
-            {
-                f"weight_decay_{optimizer.__class__.__name__}_{idx}": param_group[
-                    "weight_decay"
-                ]
-                for optimizer in self.optimizer
-                for idx, param_group in enumerate(optimizer.param_groups)
-            }
-        )
-        # Gradient clipping
-        hparams.update(
-            {
-                f"grad_clip_{optimizer.__class__.__name__}": clip
-                for optimizer, clip in zip(self.optimizer, self.grad_clip)
-            }
-        )
-        self.writer.add_hparams(hparams, train_metrics)
-
-        self.writer.flush()
-
-        self.train_epoch = []
-        self.val_epoch = []
-        self.lr_epoch = defaultdict(list)
-
-    def save_config(self) -> None:
-        os.makedirs(f"{self.name}/models", exist_ok=True)
-        # Model weights
-        self.config["optimizer_state_dicts"] = [
-            deepcopy(optimizer.state_dict()) for optimizer in self.optimizer
-        ]
-        if self.scheduler is not None:
-            self.config["scheduler_state_dicts"] = [
-                deepcopy(scheduler.state_dict()) for scheduler in self.scheduler
-            ]
-        self.config["model_state_dict"] = deepcopy(self.state_dict())
-
-        torch.save(
-            self.config,
-            f'./{self.name}/models/{self.config["name"]}_{self.config["epoch"]}.pt',
-        )
-
-    @torch.no_grad()
-    def load_config(self, epochs, train_loader) -> None:
-        try:
-            root_path = f"./{self.name_run}/models"
-            files = sorted(os.listdir(root_path))
-            if len(files) == 0:
-                raise FileNotFoundError
-            for idx, file in enumerate(files):
-                print(f"{idx+1}. {file}")
-            config = int(input("Choose the config: ")) - 1
-        except (ValueError, FileNotFoundError):
-            return None
-
-        config: Dict[str, Any] = torch.load(os.path.join(root_path, files[config]))
-        # Modules
-        self.load_state_dict(config["model_state_dict"])
-        # Optimizer
-        for optimizer, state in zip(self.optimizer, config["optimizer_state_dict"]):
-            optimizer.load_state_dict(state)
-        # Scheduler
-        if self.scheduler is not None and config["scheduler_state_dict"] is not None:
-            for scheduler, state in zip(self.scheduler, config["scheduler_state_dict"]):
-                state["total_steps"] += epochs * int(len(train_loader))
-                scheduler.load_state_dict(state)
-        # Other parameters
-        self.config["epoch"] = config["epoch"]
-        self.config["device"] = config["device"]
-        self.config["global_step_train"] = config["global_step_train"]
-        self.config["global_step_val"] = config["global_step_val"]
-
-    scheduler = [None]
-
-    def get_module_parameters(
-        modules: Iterable[Union[nn.Module, str]],
-        hyperparams: Iterable[Dict[str, float]],
-    ):
-        assert len(modules) == len(hyperparams)
-        return [
-            {"params": module}.update(hyperparam)
-            for module, hyperparam in zip(modules, hyperparams)
-        ]
-
-    def fit(
-        self,
-        train_loader: torch.utils.data.DataLoader,
-        val_loader: torch.utils.data.DataLoader,
-        epochs: int,
-        batch_size: int,
-        lr: Union[float, Iterable[float]],
-        weight_decay: Union[float, Iterable[float]] = 0.0,
-        grad_clip: bool = False,
-        opt_func: Any = torch.optim.Adam,
-        lr_sched: Any = None,
-        saving_div: int = 5,
-        graph: bool = False,
-        sample_input: Tensor = None,
-        modules: Iterable = None,
-    ) -> None:
-        self.num_runs += 1
-        torch.cuda.empty_cache()
-        # Given a list of learning rates
-        if isinstance(lr, list):
-            assert isinstance(
-                weight_decay, (tuple, list, set)
-            ), "Must define the regularization term for every param group or optimizer"
-            assert len(lr) == len(
-                weight_decay
-            ), "Should have the same amount of learning rates and regularization parameters"
-            if grad_clip:
-                assert isinstance(
-                    grad_clip, (tuple, list, set)
-                ), "You should define the gradient clipping term for every param group or optimizer"
-                assert len(grad_clip) == len(
-                    lr
-                ), "Should have the same amount of learning rates and gradient clipping parameters"
-            assert (
-                modules is not None
-            ), "Should define by param groups with modules argument for different learning rates or optimizers"
-            assert len(modules) > 1, "Should have more than one module"
-            if isinstance(opt_func, (tuple, list, set)):
-                if isinstance(lr_sched, (tuple, list, set)):
-                    assert (
-                        len(lr_sched) == len(opt_func) == len(lr)
-                        or len(lr_sched) == 1
-                        or lr_sched is None
-                    ), "Learning rate scheduler not correctly defined"
-            else:
-                assert lr_sched is None or not isinstance(lr_sched, (tuple, list, set))
-
-        # If it's the first run on notebook, we need to define and load parameters from previous loops
-        if self.num_runs == 1:
-            # More than one optimizer
-            if isinstance(opt_func, list):
-                self.params = self.get_module_parameters(modules)
-                # Defining each of the optimizers
-                self.optimizer = [
-                    optimizer(module, lr=LR, weight_decay=wd)
-                    for optimizer, module, LR, wd in zip(
-                        opt_func, self.params, lr, weight_decay
-                    )
-                ]
-                # Defining each of the schedulers
-                if isinstance(lr_sched, (list, tuple, set)):
-                    if len(lr_sched) == 1:
-                        self.scheduler = [
-                            lr_sched[0](
-                                optimizer,
-                                epoch=epochs,
-                                step_per_epoch=len(train_loader),
-                            )
-                            for optimizer in self.optimizer
-                        ]
-                    else:
-                        self.scheduler = [
-                            (
-                                scheduler(
-                                    optimizer,
-                                    epoch=epochs,
-                                    steps_per_epoch=len(train_loader),
-                                )
-                                if scheduler is not None
-                                else None
-                            )
-                            for scheduler, optimizer in zip(lr_sched, self.optimizer)
-                        ]
-                else:
-                    if lr_sched is None:
-                        self.scheduler = [lr_sched] * len(self.optimizer)
-                    else:
-                        self.scheduler = [
-                            lr_sched(
-                                optimizer,
-                                epoch=epochs,
-                                step_per_epoch=len(train_loader),
-                            )
-                            for optimizer in self.optimizer
-                        ]
-                # Since first run, we load the configuration of prior trainings
-                self.load_config(epochs, train_loader)
-            # If not more than one optimizer but different learning rates
-            elif isinstance(lr, (list, tuple, set)):
-                self.params = self.get_module_parameters(modules)
-                # Defining just one optimizer with param groups
-                self.optimizer = opt_func(
-                    self.get_module_parameters(
-                        modules,
-                        [
-                            {"lr": lr_inst, "weight_decay": wd}
-                            for lr_inst, wd in zip(lr, weight_decay)
-                        ],
-                    )
-                )
-
-                if lr_sched is not None:
-                    self.scheduler = [
-                        lr_sched(
-                            self.optimizer,
-                            epochs=epochs,
-                            steps_per_epoch=len(train_loader),
-                        )
-                    ]
-
-                self.optimizer = [self.optimizer]
-
-                self.load_config(epochs, train_loader)
-            # If none of that happens, normal training loop
-            else:
-                self.params = self.parameters()
-                # Defining the optimizer
-                self.optimizer = opt_func(self.params, lr, weight_decay=weight_decay)
-                # Defining the scheduler
-                if lr_sched is not None:
-                    self.scheduler = [
-                        lr_sched(
-                            self.optimizer,
-                            lr,
-                            epochs=epochs,
-                            steps_per_epoch=len(train_loader),
-                        )
-                    ]
-                # Putting into list for sintax
-                self.optimizer = [self.optimizer]
-                # Loading last config
-                self.load_config(epochs, train_loader)
-
-        if isinstance(lr, (float, int)):
-            lr = [lr]
-        if isinstance(weight_decay, (float, int)):
-            weight_decay = [weight_decay]
-        if isinstance(grad_clip, (float, int)):
-            grad_clip = [grad_clip]
-
-        if len(self.optimizer) > 1:
-            for optimizer, LR, wd in zip(self.optimizer, lr, weight_decay):
-                for parameter in optimizer.param_groups:
-                    parameter["lr"] = LR
-                    parameter["weight_decay"] = wd
-        else:
-            for optimizer in self.optimizer:
-                for parameter, LR, wd in zip(optimizer.param_groups, lr, weight_decay):
-                    parameter["lr"] = LR
-                    parameter["weight_decay"] = wd
-        # Clean the GPU cache
-        if graph:
-            assert (
-                sample_input is not None
-            ), "If you want to visualize a graph, you must pass through a sample tensor"
-        # Build graph in tensorboard
-        if graph and sample_input:
-            self.writer.add_graph(self, sample_input)
-
-        # Defining hyperparameters as attributes of the model and training object
-        self.batch_size = batch_size
-        self.grad_clip = grad_clip
-
-        for epoch in range(self.config["epoch"], self.config["epoch"] + epochs):
-            # Define epoch
-            self.config["epoch"] = epoch
-            # Training loop
-            self.train()
-            for train_batch in tqdm(train_loader, desc=f"Training - Epoch: {epoch}"):
-                # training step
-                self.training_step(train_batch)
-            # Validation loop
-            self.eval()
-            for val_batch in tqdm(val_loader, desc=f"Validation - Epoch: {epoch}"):
-                self.validation_step(val_batch)
-            # Save model and config if epoch mod(saving_div) = 0
-            if epoch % saving_div == 0:
-                self.save_config()
-            # Show sample of data
-            self.imshow(val_loader)
-            # End of epoch
-            self.end_of_epoch()
-
-    def imshow(self, loader):
-        for batch in loader:
-            I_gt, M_l_1 = batch
-
-            I_gt = I_gt[0, :, :, :]
-            M_l_1 = M_l_1[0, :, :, :]
-
-            I_out, M_l_2 = self(I_gt.unsqueeze(0), M_l_1.unsqueeze(0))
-
-            I_out = I_out[0, :, :, :]
-            M_l_2 = M_l_2[0, :, :, :]
-
-            I_out: np.array = I_out.view(1024, 1024).detach().cpu().numpy()
-            I_gt: np.array = I_gt.view(1024, 1024).detach().cpu().numpy()
-
-            mathcal_M = (
-                (M_l_1.bool() ^ M_l_2.bool()).cpu().detach().view(1024, 1024).numpy()
-            )
-
-            M_l_2 = M_l_2.cpu().detach().view(1024, 1024).numpy()
-
-            diff = I_out * mathcal_M
-
-            # Make plot
-            fig, axes = plt.subplots(1, 3)
-            axes[0].imshow(I_gt)
-            axes[1].imshow(I_out)
-            axes[2].imshow(diff)
-
-            for ax in axes:
-                ax.set_xticks([])
-                ax.set_yticks([])
-
-            plt.show()
-
-            fig.savefig(f'{self.name_run}/images/{self.config["epoch"]}.png')
-            break
-
-
-class SingleLayer(TrainingPhase):
-
-    def __init__(self, name_run: str, criterion, res_arch: Tuple[int, ...]):
-        super().__init__(name_run, criterion)
+        self.criterion = NewInpaintingLoss(*criterion_args)
         # Activation function
         self.act = nn.SiLU()
         # Partial convolutional layers
@@ -479,65 +109,20 @@ class SingleLayer(TrainingPhase):
         # forward pass for single layer
         x, updated_mask = self(ground_truth, prior_mask)
         # Compute each term of the loss function
-        L_pixel, L_perceptual, L_style = self.criterion(
+        args = self.criterion(
             x, ground_truth, prior_mask, updated_mask
         )
-        loss = L_pixel + L_perceptual + L_style
 
-        metrics = {
-            f"Pixel-wise Loss": L_pixel.item(),
-            f"Perceptual loss": L_perceptual.item(),
-            f"Style Loss": L_style.item(),
-            f"Overall": loss.item(),
-        }
+        metrics = {k:v for k,v in zip(self.criterion.labels, args)}
 
-        self.batch_metrics(metrics, f"Training")
+        self.log_dict(metrics, prog_bar=True)
+        
+        return args[-1]
 
-        loss.backward()
-
-        # gradient clipping
-        if self.grad_clip:
-            nn.utils.clip_grad_value_(self.parameters(), self.grad_clip)
-        # optimizer step
-        self.optimizer.step()
-        self.optimizer.zero_grad()
-        # scheduler step
-        if self.scheduler:
-            lr = get_lr(self.optimizer)
-            self.lr_epoch.append(lr)
-            self.writer.add_scalars(
-                "Training", {"lr": lr}, self.config["global_step_train"]
-            )
-            self.scheduler.step()
-        self.writer.flush()
-        # Global step shift
-        self.config["global_step_train"] += 1
-
-    def imshow(self, train_loader):
-        for batch in train_loader:
-            img, mask = batch
-            x, updated_mask = self(img, mask)
-            mathcal_mask: Tensor = updated_mask.bool() ^ mask.bool()
-
-            x: np.array = self.inverse_transform(x)
-            mask = mask.cpu().detach().view(1024, 1024).numpy()
-            mathcal_mask = mathcal_mask.cpu().detach().view(1024, 1024).numpy()
-
-            # Make plot
-            fig, ax = plt.subplots(1, 4)
-            ax[0].imshow(img)
-            ax[1].imshow(x)
-            ax[2].imshow(x * mask)
-            ax[3].imshow(x * mathcal_mask)
-            plt.yticks([])
-            plt.xticks([])
-            plt.show()
-            break
-
-
-class UNetArchitecture(TrainingPhase):
-    def __init__(self, name_run: str, criterion) -> None:
-        super().__init__(name_run, criterion)
+class UNetArchitecture(LightningModule):
+    def __init__(self, criterion) -> None:
+        super().__init__()
+        self.criterion = criterion
         self.relu = nn.ReLU()
         self.silu = nn.SiLU()
         self.max_pool = nn.MaxPool2d(2, 2)
@@ -649,61 +234,35 @@ class UNetArchitecture(TrainingPhase):
         out = self.decoder(x_1, x_2, x_3, x_4, out)
         return out
 
-    def loss(self, batch):
+    def training_step(self, batch):
         img, mask = batch
         pred = self(img, mask)
         # Computing the loss
-        L_pixel, L_perceptual, L_style = self.criterion(pred, img, mask)
-        loss = L_pixel + L_perceptual + L_style
+        args = self.criterion(pred, img, mask)
         # Defining the metrics that will be wrote
-        metrics = {
-            f"Pixel-wise Loss": L_pixel.item(),
-            f"Perceptual loss": L_perceptual.item(),
-            f"Style Loss": L_style.item(),
-            f"Overall": loss.item(),
-        }
-
-        return metrics, loss
+        metrics = {k:v for k,v in zip(self.criterion.labels, args)}
+        
+        self.log_dict(metrics)
+        
+        return args[-1]
 
     @torch.no_grad()
     def validation_step(self, batch) -> None:
         img, mask = batch
-        x = self(img, mask)
-        L_pixel, L_perceptual, L_style = self.criterion(x, img, mask)
-        metrics = {
-            f"Pixel-wise Loss": L_pixel.item(),
-            f"Perceptual loss": L_perceptual.item(),
-            f"Style Loss": L_style.item(),
-            f"Overall": (L_pixel + L_perceptual + L_style).item(),
-        }
-        self.batch_metrics(metrics, "Validation")
-        self.config["global_step_val"] += 1
+        pred = self(img, mask)
+        # Computing the loss
+        args = self.criterion(pred, img, mask)
+        # Defining the metrics that will be wrote
+        metrics = {k:v for k,v in zip(self.criterion.labels, args)}
+        
+        self.log_dict(metrics)
+        
+        return args[-1]
 
-    def imshow(self, train_loader):
-        for batch in train_loader:
-            img, mask = batch
-            x = self(img, mask)
-
-            x: np.array = self.inverse_transform(x[0, :, :, :].unsqueeze(0))
-            img: np.array = self.inverse_transform(img[0, :, :, :].unsqueeze(0))
-            mask = mask[0, :, :, :].cpu().detach().view(1024, 1024).numpy()
-
-            img_norm = ImageNormalize(stretch=HistEqStretch(img[np.isfinite(img)]))(img)
-            x_norm = ImageNormalize(stretch=HistEqStretch(x[np.isfinite(x)]))(x)
-
-            # Make plot
-            fig, ax = plt.subplots(1, 2)
-            ax[0].imshow(img_norm)
-            ax[1].imshow(x_norm)
-            plt.yticks([])
-            plt.xticks([])
-            plt.show()
-            break
-
-
-class UNetArchitectureDeluxe(TrainingPhase):
-    def __init__(self, name_run: str, criterion, in_channels):
-        super().__init__(name_run, criterion)
+class UNetArchitectureDeluxe(LightningModule):
+    def __init__(self, criterion):
+        super().__init__()
+        self.criterion = criterion
         self.up_act = lambda input: F.relu(6 * F.sigmoid(input))
         self.down_act = nn.SiLU()
         self.upsample = lambda input: nn.functional.interpolate(
@@ -711,7 +270,7 @@ class UNetArchitectureDeluxe(TrainingPhase):
         )
         self.max_pool = nn.MaxPool2d(2, 2)
         # Encoder
-        self.conv1 = PartialConv2d(in_channels, 32, 3, 1, 1)
+        self.conv1 = PartialConv2d(1, 32, 3, 1, 1)
         self.norm1 = nn.BatchNorm2d(32)
 
         self.conv2 = PartialConv2d(32, 64, 3, 1, 1)
@@ -916,7 +475,7 @@ class UNetArchitectureDeluxe(TrainingPhase):
         out, mask_in = self.decoder(x, x_1, x_2, mask_in)
         return out * ~first_mask.bool() + gt * first_mask, mask_in
 
-    def loss(self, batch: Tensor) -> Tuple[Dict[str, float], Tensor]:
+    def training_step(self, batch: Tensor) -> Tuple[Dict[str, float], Tensor]:
         I_gt, M_l_1 = batch
 
         I_out, M_l_2 = self(I_gt, M_l_1)
@@ -940,18 +499,13 @@ class UNetArchitectureDeluxe(TrainingPhase):
 
         I_out, M_l_2 = self(I_gt, M_l_1)
 
-        L_pixel, L_perceptual, L_style = self.criterion(I_out, I_gt, M_l_1, M_l_2)
+        args = self.criterion(I_out, I_gt, M_l_1, M_l_2)
 
-        metrics = {
-            f"Pixel-wise Loss": L_pixel.item(),
-            f"Perceptual loss": L_perceptual.item(),
-            f"Style Loss": L_style.item(),
-            f"Overall": (L_pixel + L_perceptual + L_style).item(),
-        }
+        metrics = {k:v for k, v in zip(self.criterion.labels, args)}
 
-        self.batch_metrics(metrics, "Validation")
-        self.config["global_step_val"] += 1
+        self.log_dict(metrics)
 
+        return args[-1]
     def imshow(self, train_loader):
         for batch in train_loader:
             I_gt, M_l_1 = batch
@@ -1003,10 +557,10 @@ class UNetArchitectureDeluxe(TrainingPhase):
             plt.show()
             break
 
-
-class SmallUNet(TrainingPhase):
-    def __init__(self, name_run: str, criterion, layers: int) -> None:
-        super().__init__(name_run, criterion)
+class SmallUNet(InpaintingBase):
+    def __init__(self, layers: int, criterion_args) -> None:
+        super().__init__()
+        self.criterion = NewInpaintingLoss(*criterion_args)
         # General utils
         self.relu = nn.ReLU()
         self.spe_act: Callable[[Tensor], Tensor] = lambda x: F.relu(6 * F.sigmoid(x))
@@ -1254,3 +808,327 @@ class DefaultResidual(nn.Module):
             x = self.act(x)
 
         return I_out + x, mask_in
+    
+
+# UNet like architectures with residual connections
+class FourierPartial(LightningModule):
+    def __init__(self, criterion, hyperparams):
+        super().__init__()
+        self.criterion = criterion
+        
+        self.save_hyperparameters({
+            f'{base}_{arg}': dict_[arg]  for base, dict_ in zip(['encoder', 'decoder'], hyperparams) for arg in dict_
+        }.update(self.criterion.factors))
+
+        self.hyperparams = hyperparams
+        
+        self.maxpool = lambda x: F.max_pool2d(x, 2, 2)
+        self.upsample = lambda x: F.interpolate(x, scale_factor=2, mode="nearest")
+
+        self.hid_act = lambda x: F.relu(x)
+        self.last_act = lambda x: F.sigmoid(x)
+
+        self.fconv1 = FourierPartialConv2d(1, 32, 3, 1, 1)  # -> 32, 1024, 1024
+        self.norm1 = nn.BatchNorm2d(32)
+
+        self.fconv2 = FourierPartialConv2d(32, 64, 3, 1, 1)  # -> 64, 512, 512
+        self.norm2 = nn.BatchNorm2d(64)
+
+        self.fconv3 = FourierPartialConv2d(64, 128, 3, 1, 1)  # -> 128, 256, 256
+        self.norm3 = nn.BatchNorm2d(128)
+
+        self.fconv4 = FourierPartialConv2d(128, 256, 3, 1, 1)  # -> 256, 128, 128
+        self.norm4 = nn.BatchNorm2d(256)
+
+        self.fconv5 = FourierPartialConv2d(256, 512, 5, 1, 2)  # -> 512, 64, 64
+        self.norm5 = nn.BatchNorm2d(512)
+
+        self.fconv6 = FourierPartialConv2d(512, 1024, 7, 1, 3)  # -> 1024, 32, 32
+
+        self.fupconv1 = FourierPartialConv2d(1024, 512, 7, 1, 3)  # -> 512, 32, 32
+        self.upnorm1 = nn.BatchNorm2d(512)
+
+        self.fupconv2 = FourierPartialConv2d(512, 256, 3, 1, 1)  # -> 256, 64, 64
+        self.upnorm2 = nn.BatchNorm2d(256)
+
+        self.fupconv3 = FourierPartialConv2d(256, 128, 3, 1, 1)  # -> 128, 128, 128
+        self.upnorm3 = nn.BatchNorm2d(128)
+
+        self.fupconv4 = FourierPartialConv2d(128, 64, 3, 1, 1)  # -> 64, 256, 256
+        self.upnorm4 = nn.BatchNorm2d(64)
+
+        self.fupconv5 = FourierPartialConv2d(64, 32, 3, 1, 1)  # ->  32, 512, 512
+        self.upnorm5 = nn.BatchNorm2d(32)
+
+        self.upconv6 = PartialConv2d(32, 1, 3, 1, 1)  # ->  1, 1024, 1024
+
+        self.attention = FourierMultiheadAttention(1024, 8)
+
+    def joint_maxpool(self, x: Tensor, mask_in: Tensor) -> Tuple[Tensor, Tensor]:
+        return self.maxpool(x), self.maxpool(mask_in)
+
+    def joint_upsample(self, x: Tensor, mask_in: Tensor) -> Tuple[Tensor, Tensor]:
+        return self.upsample(x), self.upsample(mask_in)
+
+    def forward(self, x: Tensor, mask_in: Tensor) -> Tuple[Tensor, Tensor]:
+        # for output
+        gt = x.clone()
+        init_mask = mask_in.clone()
+        # First layer
+        x, mask_in = self.fconv1(x, mask_in)  # -> 32, 1024, 1024
+        x = self.norm1(x)
+        x_1 = self.hid_act(x)
+        x, mask_in = self.joint_maxpool(x_1, mask_in)  #  -> 32, 512, 512
+
+        # Second layer
+        x, mask_in = self.fconv2(x, mask_in)  # -> 64, 512, 512
+        x = self.norm2(x)
+        x_2 = self.hid_act(x)
+        x, mask_in = self.joint_maxpool(x_2, mask_in)  # -> 64, 256, 256
+
+        # Third layer
+        x, mask_in = self.fconv3(x, mask_in)  # -> 128, 256, 256
+        x = self.norm3(x)
+        x_3 = self.hid_act(x)
+        x, mask_in = self.joint_maxpool(x_3, mask_in)  # -> 128, 128, 128
+
+        # Fourth layer
+        x, mask_in = self.fconv4(x, mask_in)  # -> 256, 128, 128
+        x = self.norm4(x)
+        x_4 = self.hid_act(x)
+        x, mask_in = self.joint_maxpool(x_4, mask_in)  # -> 256, 64, 64
+
+        # Fifth layer
+        x, mask_in = self.fconv5(x, mask_in)  # -> 512, 64, 64
+        x = self.norm5(x)
+        x_5 = self.hid_act(x)
+        x, mask_in = self.joint_maxpool(x_5, mask_in)  # -> 512, 32, 32
+
+        # Sixth layer
+        x, mask_in = self.fconv6(x, mask_in)  # -> 1024, 32, 32
+
+        # Fourier attention layer and residual connection
+        x, mask_in = self.fupconv1(x + self.attention(x), mask_in)  # -> 512, 32, 32
+        x = self.upnorm1(x)
+        x = self.hid_act(x)
+
+        x, mask_in = self.joint_upsample(x, mask_in)  # -> 512, 64, 64
+
+        x += x_5
+
+        x, mask_in = self.fupconv2(x, mask_in)  # -> 256, 64, 64
+        x = self.upnorm2(x)
+        x = self.hid_act(x)
+
+        x, mask_in = self.joint_upsample(x, mask_in)  # -> 256, 128, 128
+
+        x += x_4
+
+        x, mask_in = self.fupconv3(x, mask_in)  # -> 512, 128, 128
+        x = self.upnorm3(x)
+        x = self.hid_act(x)
+
+        x, mask_in = self.joint_upsample(x, mask_in)  # -> 512, 256, 256
+
+        x += x_3
+
+        x, mask_in = self.fupconv4(x, mask_in)  # -> 512, 128, 128
+        x = self.upnorm4(x)
+        x = self.hid_act(x)
+
+        x, mask_in = self.joint_upsample(x, mask_in)  # -> 512, 256, 256
+
+        x += x_2
+
+        x, mask_in = self.fupconv5(x, mask_in)  # -> 512, 128, 128
+        x = self.upnorm5(x)
+        x = self.hid_act(x)
+
+        x, mask_in = self.joint_upsample(x, mask_in)  # -> 512, 256, 256
+
+        x += x_1
+
+        x, mask_in = self.upconv6(x, mask_in)
+
+        x = self.last_act(x)
+
+        return x * ~init_mask.bool() + gt * init_mask.bool(), mask_in
+
+    def training_step(self, batch: Tensor) -> Tensor:
+        I_gt, M_l_1 = batch
+        I_out, M_l_2 = self(I_gt, M_l_1)
+        args = self.criterion(I_out, I_gt, M_l_1, M_l_2)
+        metrics = {k: v.item() for k, v in zip(self.criterion.labels, args)}
+        self.log_dict(metrics, prog_bar=True)
+        return args[-1]
+    
+    def validation_step(self, batch) -> Tensor:
+        I_gt, M_l_1 = batch
+        I_out, M_l_2 = self(I_gt, M_l_1)
+        args = self.criterion(I_out, I_gt, M_l_1, M_l_2)
+        self.log('val_loss', args[-1], True)
+        return args[-1]
+        
+    def configure_optimizers(self):
+        encoder_param_group = defaultdict(list)
+        decoder_param_group = defaultdict(list)
+
+        for name, param in self.named_parameters():
+            if name.startswith(('fconv', 'norm')):
+                encoder_param_group['params'].append(param)
+            else:
+                decoder_param_group['params'].append(param)
+
+        optimizer = torch.optim.Adam([
+            {'params': encoder_param_group['params'], **self.hyperparams[0]},
+            {'params': decoder_param_group['params'], **self.hyperparams[1]}
+        ])
+
+        return optimizer
+
+# Generative VAE for image inpainting with fourier
+class FourierVAE(LightningModule):
+    def __init__(self, hyperparams, criterion) -> None:
+        super().__init__()
+        self.criterion = criterion
+        
+        self.save_hyperparameters({
+            f'{base}_{arg}': dict_[arg]  for base, dict_ in zip(['encoder', 'decoder'], hyperparams) for arg in dict_
+        }.update(self.criterion.factors))
+
+        self.hyperparams = hyperparams
+        self.fft = fftn
+        self.ifft = ifftn
+        self.maxpool = lambda x: F.max_pool2d(x, 2, 2)
+        self.upsample = lambda x: F.interpolate(x, scale_factor=2, mode="nearest")
+
+        self.hid_act = lambda x: F.relu(x)
+        self.last_act = lambda x: F.sigmoid(x)
+
+        self.fconv1 = _FourierConv(1, 1024, 1024)  # -> 1, 1024, 1024
+
+        self.fconv2 = _FourierConv(1, 512, 512)  # -> 1, 512, 512
+
+        self.fconv3 = _FourierConv(1, 256, 256)  # -> 1, 256, 256
+
+        self.fconv4 = _FourierConv(1, 128, 128)  # -> 1, 128, 128
+
+        self.fconv5 = _FourierConv(1, 64, 64)  # -> 1, 64, 64
+
+        self.fconv6 = _FourierConv(
+            1, 32, 32
+        )  # -> 1, 32, 32 -> normal space distribution with ifftn
+
+        # This goes all in reparametrization
+        self.flatten = nn.Flatten()
+
+        self.mu_fc = nn.Linear(32 * 32, 32 * 32)
+        self.logvar_fc = nn.Linear(32 * 32, 32 * 32)
+
+        self.upconv1 = ResidualFourierConvTranspose2d(
+            1024, 512, 3, 1, 1
+        )  # -> 512, 32, 32
+        self.upnorm1 = nn.BatchNorm2d(512)
+
+        self.upconv2 = ResidualFourierConvTranspose2d(
+            512, 256, 4, 2, 1
+        )  # -> 256, 64, 64
+        self.upnorm2 = nn.BatchNorm2d(256)
+
+        self.upconv3 = ResidualFourierConvTranspose2d(
+            256, 128, 4, 2, 1
+        )  # -> 128, 128, 128
+        self.upnorm3 = nn.BatchNorm2d(128)
+
+        self.upconv4 = ResidualFourierConvTranspose2d(
+            128, 64, 4, 2, 1
+        )  # -> 64, 256, 256
+        self.upnorm4 = nn.BatchNorm2d(64)
+
+        self.upconv5 = ResidualFourierConvTranspose2d(
+            64, 32, 4, 2, 1
+        )  # ->  32, 512, 512
+        self.upnorm5 = nn.BatchNorm2d(32)
+
+        self.upconv6 = ResidualFourierConvTranspose2d(
+            32, 1, 4, 2, 1
+        )  # ->  1, 1024, 1024
+
+        self.fc = nn.Sequential(nn.Conv2d(1, 1, 3, 1, 1), nn.Sigmoid())
+
+    def reparametrization(self, out: Tensor, in_channels: int) -> Tensor:
+        b, c, h, w = out.shape
+        out = self.flatten(out)
+        logvar = self.logvar_fc(out).view(b, c, h, w)  # std: b, c, h, w (b, 1, 32, 32)
+        mu = self.mu_fc(out).view(b, c, h, w)  # mu: b, c, h, w (b, 1, 32, 32)
+        std = torch.exp(0.5 * logvar)
+        eps = torch.randn(b, in_channels, h, w)
+        return mu + eps * std, mu, logvar
+
+    def _joint_maxpool(self, Re: Tensor, Im: Tensor) -> Tuple[Tensor, Tensor]:
+        return self.maxpool(Re) + 1j * self.maxpool(Im)
+
+    def forward(self, x: Tensor, mask_in: Tensor) -> Tensor:
+        # To fourier space
+        out = self.fft(x * mask_in, dim=(-2, -1))
+
+        weight_1 = self.fconv1(out)
+        out = self._joint_maxpool(weight_1.real, weight_1.imag)  # -> 1, 512, 512
+        weight_2 = self.fconv2(out)
+        out = self._joint_maxpool(weight_2.real, weight_2.imag)  # -> 1, 256, 256
+        weight_3 = self.fconv3(out)
+        out = self._joint_maxpool(weight_3.real, weight_3.imag)  # -> 1, 128,128
+        weight_4 = self.fconv4(out)
+        out = self._joint_maxpool(weight_4.real, weight_4.imag)  # -> 1, 64,64
+        weight_5 = self.fconv5(out)
+        out = self._joint_maxpool(weight_5.real, weight_5.imag)  # -> 1, 32, 32
+        weight_6 = self.fconv6(out)  # -> 1, 32,32
+        out = self.ifft(out).real  # -> Real
+
+        out, mu, logvar = self.reparametrization(out, 1024)  # -> 1024, 32, 32
+
+        z = self.upconv1(out, weight_6)  # -> 512, 32, 32
+        z = self.hid_act(z)
+        z = self.upnorm1(z)
+        z = self.upconv2(z, weight_5)  # -> 256, 64, 64
+        z = self.hid_act(z)
+        z = self.upnorm2(z)
+        z = self.upconv3(z, weight_4)  # -> 128, 128, 128
+        z = self.hid_act(z)
+        z = self.upnorm3(z)
+        z = self.upconv4(z, weight_3)  # -> 64, 256, 256
+        z = self.hid_act(z)
+        z = self.upnorm4(z)
+        z = self.upconv5(z, weight_2)  # -> 32, 512, 512
+        z = self.hid_act(z)
+        z = self.upnorm5(z)
+        z = self.upconv6(z, weight_1)  # -> 1, 1024, 1024
+        z = self.hid_act(z)
+        z = self.fc(z)
+
+        return z*~mask_in.bool() + x*mask_in, mu, logvar
+
+    def training_step(self, batch: Tensor) -> Tensor:
+        I_gt, mask = batch
+        I_out, mu, logvar = self(I_gt, mask)
+        args = self.criterion(I_out, I_gt, mask, mu, logvar)
+        metrics = {k: v.item() for k, v in zip(self.criterion.labels, args)}
+        self.log_dict(metrics, prog_bar=True, enable_graph=True)
+        return args[-1]
+        
+    def configure_optimizers(self):
+        encoder_param_group = defaultdict(list)
+        decoder_param_group = defaultdict(list)
+
+        for name, param in self.named_parameters():
+            if name.startswith('fconv'):
+                encoder_param_group['params'].append(param)
+            else:
+                decoder_param_group['params'].append(param)
+
+        optimizer = torch.optim.Adam([
+            {'params': encoder_param_group['params'], **self.hyperparams[0]},
+            {'params': decoder_param_group['params'], **self.hyperparams[1]}
+        ])
+
+        return optimizer

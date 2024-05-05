@@ -1,6 +1,6 @@
 from lightning.pytorch import seed_everything, callbacks
 from lightning.pytorch.utilities.types import EVAL_DATALOADERS
-from fourier import FourierVAE, FourierPartial
+from models import FourierPartial, FourierVAE, SmallUNet
 from torch import Tensor
 from loss import FourierModelCriterion, NewInpaintingLoss
 import lightning as L
