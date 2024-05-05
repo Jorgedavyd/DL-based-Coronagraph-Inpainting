@@ -1,4 +1,5 @@
-from lightning.pytorch import seed_everything
+from lightning.pytorch import seed_everything, callbacks
+from lightning.pytorch.utilities.types import EVAL_DATALOADERS
 from fourier import FourierVAE, FourierPartial
 from torch import Tensor
 from loss import FourierModelCriterion, NewInpaintingLoss
@@ -7,6 +8,7 @@ from ax.service.managed_loop import optimize
 from data import CoronagraphDataModule
 from typing import List, Dict
 import torch
+
 
 # Hyperparameter grids
 hyperparameters: List[Dict[str,str]] = [
@@ -23,7 +25,7 @@ hyperparameters: List[Dict[str,str]] = [
 ]
 
 # Defining the Data module
-dataset = CoronagraphDataModule(2)
+dataset = CoronagraphDataModule(1)
 
 def objective(hyperparams):
     # Optimizer parameters
@@ -50,7 +52,8 @@ def objective(hyperparams):
     ])
 
     # Train the model
-    trainer = L.Trainer(max_epochs=5, limit_train_batches=0.25)
+    trainer = L.Trainer(accelerator='gpu', devices=1, max_epochs=5, limit_train_batches=1/5, check_val_every_n_epoch=6)
+    
     trainer.fit(model, dataset)
 
     # Evaluate the model
@@ -58,10 +61,11 @@ def objective(hyperparams):
 
     return val_loss
 
+
 if __name__ == '__main__':
     # Reproducibility
     seed_everything(42, True)
-    torch.set_float32_matmul_precision('high')
+    torch.set_float32_matmul_precision('medium')
     # Multi-objective optimization
     best_parameters, values, experiment, model = optimize(
         parameters=hyperparameters,
