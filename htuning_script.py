@@ -4,11 +4,7 @@ import optuna
 from lightning import LightningApp
 from lightning_hpo import Sweep
 from lightning_hpo.algorithm.optuna import OptunaAlgorithm
-from lightning_hpo.distributions.distributions import (
-    Categorical,
-    IntUniform,
-    LogUniform,
-)
+from lightning_hpo.distributions.distributions import LogUniform
 
 app = LightningApp(
     Sweep(
@@ -20,10 +16,15 @@ app = LightningApp(
             "--model.encoder_lr": LogUniform(1e-7, 1e-3),
             "--model.decoder_lr": LogUniform(1e-6, 1e-2),
             "--model.decoder_wd": LogUniform(1e-6, 1e-2),
-            "--data.batch_size": Categorical([32, 64]),
-            "--trainer.max_epochs": IntUniform(1, 3),
+            "--model.alpha_1": LogUniform(1e-2, 120.),
+            "--model.alpha_2": LogUniform(1e-2, 120.),
+            "--model.alpha_3": LogUniform(1e-2, 120.),
+            "--model.alpha_4": LogUniform(1e-2, 120.),
+            "--model.alpha_5": LogUniform(1e-2, 120.),
+            "--model.alpha_6": LogUniform(1e-2, 120.),
+            "--model.alpha_7": LogUniform(1e-2, 120.)
         },
-        algorithm=OptunaAlgorithm(optuna.create_study(direction="maximize")),
+        algorithm=OptunaAlgorithm(optuna.create_study(direction="minimize")),
         framework="pytorch_lightning",
     )
 )
