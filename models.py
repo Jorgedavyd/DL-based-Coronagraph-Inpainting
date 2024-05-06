@@ -15,8 +15,8 @@ from torchmetrics.image import PeakSignalNoiseRatio, StructuralSimilarityIndexMe
 
 class InpaintingBase(LightningModule):
 
-    peak_signal = PeakSignalNoiseRatio()
-    ssim = StructuralSimilarityIndexMeasure()
+    peak_signal = PeakSignalNoiseRatio().to('cuda')
+    ssim = StructuralSimilarityIndexMeasure().to('cuda')
 
     def training_step(self, batch) -> Tensor:
         x, mask_in = batch
@@ -32,7 +32,7 @@ class InpaintingBase(LightningModule):
 
         return args[-1]
     
-    def validation_step(self, batch) -> Tensor:
+    def validation_step(self, batch, batch_idx) -> Tensor:
         x, mask_in = batch 
         y, mask_out = self(x, mask_in)
 
@@ -824,7 +824,6 @@ class FourierPartial(InpaintingBase):
             alpha_4: float,
             alpha_5: float,
             alpha_6: float,
-            alpha_7: float
     ):
         super().__init__()
 
@@ -839,10 +838,9 @@ class FourierPartial(InpaintingBase):
         self.alpha_4 = alpha_4
         self.alpha_5 = alpha_5
         self.alpha_6 = alpha_6
-        self.alpha_7 = alpha_7
 
-        self.criterion = FourierModelCriterion(
-            [alpha_1, alpha_2, alpha_3, alpha_4, alpha_5, alpha_6, alpha_7]
+        self.criterion = NewInpaintingLoss(
+            [alpha_1, alpha_2, alpha_3, alpha_4, alpha_5, alpha_6]
         )
         
         self.save_hyperparameters()

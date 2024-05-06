@@ -25,14 +25,14 @@ hyperparameters: List[Dict[str,str]] = [
 ]
 
 # Defining the Data module
-dataset = CoronagraphDataModule(1)
+dataset = CoronagraphDataModule(2)
 
 def objective(hyperparams):
     # Optimizer parameters
     encoder_lr = hyperparams.get('encoder_lr')
-    encoder_weight_decay = hyperparams.get('encoder_weight_decay')
+    encoder_wd = hyperparams.get('encoder_weight_decay')
     decoder_lr = hyperparams.get('decoder_lr') 
-    decoder_weight_decay = hyperparams.get('decoder_weight_decay') 
+    decoder_wd = hyperparams.get('decoder_weight_decay') 
     # Criterion parameters
     alpha_1 = hyperparams.get('alpha_1')
     alpha_2 = hyperparams.get('alpha_2')
@@ -41,18 +41,22 @@ def objective(hyperparams):
     alpha_5 = hyperparams.get('alpha_5')
     alpha_6 = hyperparams.get('alpha_6')
     
-    criterion = NewInpaintingLoss(
-        Tensor([alpha_1, alpha_2, alpha_3, alpha_4, alpha_5, alpha_6])
-    )
-    
     # Create LightningModule with suggested hyperparameters
-    model = FourierPartial(criterion, [
-        {'lr': encoder_lr, 'weight_decay': encoder_weight_decay},
-        {'lr': decoder_lr, 'weight_decay': decoder_weight_decay}
-    ])
+    model = FourierPartial(
+        encoder_lr,
+        encoder_wd,
+        decoder_lr,
+        decoder_wd,
+        alpha_1,
+        alpha_2, 
+        alpha_3,
+        alpha_4,
+        alpha_5,
+        alpha_6
+    )
 
     # Train the model
-    trainer = L.Trainer(accelerator='gpu', devices=1, max_epochs=5, limit_train_batches=1/5, check_val_every_n_epoch=6)
+    trainer = L.Trainer(accelerator='gpu', devices=1, max_epochs=5, limit_train_batches=1/5, check_val_every_n_epoch=6, precision = 'bf16')
     
     trainer.fit(model, dataset)
 
@@ -64,7 +68,7 @@ def objective(hyperparams):
 
 if __name__ == '__main__':
     # Reproducibility
-    seed_everything(42, True)
+    seed_everything(42)
     torch.set_float32_matmul_precision('medium')
     # Multi-objective optimization
     best_parameters, values, experiment, model = optimize(
