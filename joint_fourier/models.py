@@ -6,9 +6,12 @@ import torch.nn.functional as F
 import torch
 from lightning import LightningModule
 from .loss import Loss
-
+from torch.fft import fftn
 
 class SingleFourierBlock(nn.Module):
+    pool = None
+    normal_activation = None
+    fourier_activation = None
     def __init__(
             self,
             height: int,
@@ -26,13 +29,20 @@ class SingleFourierBlock(nn.Module):
             dropout: float = 0.1
     ) -> None:
         super().__init__()
+        self.normal_activation = normal_activation
+        self.fourier_activation = fourier_activation
+        self.batch_norm = batch_norm
+        self.pool = pool
+        self.fft = fftn
         self.conv1 = PartialConv2d(in_channels, out_channels, kernel_size, stride, padding)
         if pool is not None:
             self.pool = lambda x: F.max_pool2d(x, pool, pool)
-        if batch_norm:
-            self.norm1 = nn.BatchNorm2d(out_channels)
-            self.Re_fnorm1 = nn.BatchNorm(in_channels)
-            self.Im_fnorm1 = nn.BatchNorm(in_channels)
+
+        self.norm1 = nn.BatchNorm2d(out_channels)
+        self.Re_fnorm1 = nn.BatchNorm2d(in_channels)
+        self.Im_fnorm1 = nn.BatchNorm2d(in_channels)
+        self.norm2 = nn.BatchNorm2d(out_channels)
+
         if normal_activation is not None:
             match normal_activation:
                 case 'relu':
@@ -57,19 +67,29 @@ class SingleFourierBlock(nn.Module):
 
         self.fconv1 = _FourierConv(in_channels, height, width)
 
-        self.attention = ChannelWiseSelfAttention(in_channels, num_heads, dropout = dropout)
+        self.attention = ChannelWiseSelfAttention(in_channels, num_heads, dropout, kdim = in_channels, vdim = out_channels)
         
     def forward(self, x: Tensor, mask_in: Tensor) -> Tuple[Tensor, Tensor]:
         b, _, h, w = b.shape
+
         # Normal forward
         n_out, updated_mask= self.conv1(x, mask_in)
-        n_out = self.normal_act(n_out)
-        n_out = self.norm1(n_out)
+        if self.normal_activation is not None:
+            n_out = self.normal_act(n_out)
+        if self.batch_norm:
+            n_out = self.norm1(n_out)
+
         # Fourier Forward
-        f_out = self.fconv1(x * mask_in)
-        f_out = self.fourier_act(f_out)
-        Re_out = self.Re_fnorm1(f_out.real) # in_channels, h, w
-        Im_out = self.Im_fnorm1(f_out.imag) # in_channels, h, w
+        f_out = self.fft(x*mask_in)
+        f_out = self.fconv1(f_out)
+
+        if self.fourier_activation is not None:
+            f_out = self.fourier_act(f_out)
+
+        if self.batch_norm:
+            Re_out = self.Re_fnorm1(f_out.real) # in_channels, h, w
+            Im_out = self.Im_fnorm1(f_out.imag) # in_channels, h, w
+        
         # Perform multihead attention
         out = self.attention(
             Re_out.view(b, self.in_channels, -1),
@@ -77,7 +97,8 @@ class SingleFourierBlock(nn.Module):
             n_out.view(b, self.out_channels, -1),
         ).view(b, self.out_channels, h, w)
         
-
+        out = self.norm2(out+n_out)
+        
         return out + n_out, updated_mask, Re_out, Im_out
 
 class DefaultUpsamplingBlock(nn.Module):

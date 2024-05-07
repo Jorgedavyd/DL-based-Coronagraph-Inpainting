@@ -1,4 +1,4 @@
-from models import DeluxeFourierModel
+from .models import SmallUNet
 import optuna
 from lightning import Trainer
 from data import CoronagraphDataModule
@@ -7,6 +7,7 @@ import argparse
 import torch
 
 def define_hyp(trial: optuna.trial.Trial):
+
     encoder_lr = trial.suggest_loguniform('encoder_lr', 1e-8, 1e-2) 
     encoder_wd = trial.suggest_loguniform('encoder_wd', 1e-8, 1e-3)
     decoder_lr = trial.suggest_loguniform('decoder_lr', 1e-8, 1e-2)
@@ -18,11 +19,8 @@ def define_hyp(trial: optuna.trial.Trial):
     alpha_4 = trial.suggest_float('alpha_4', 1e-4, 120)
     alpha_5 = trial.suggest_float('alpha_5', 1e-4, 120)
     alpha_6 = trial.suggest_float('alpha_6', 1e-4, 120)
-    normal_activation = trial.suggest_categorical('normal_activation', ['relu', 'sigmoid', 'swiglu', 'silu'])
-    fourier_activation = trial.suggest_categorical('normal_activation', ['relu', 'sigmoid', 'swiglu', 'silu'])
-    dropout = trial.suggest_float('dropout', 0.1, 0.3)
     optimizer = trial.suggest_categorical('optimizer', [torch.optim.Adam, torch.optim.RMSprop, torch.optim.SGD])
-    num_heads = trial.suggest_int('number of heads', 2, 12)
+
     return (
         encoder_lr,
         encoder_wd,
@@ -31,17 +29,12 @@ def define_hyp(trial: optuna.trial.Trial):
         optimizer,
         layers,
         [alpha_1, alpha_2, alpha_3, alpha_4, alpha_5, alpha_6],
-        normal_activation,
-        fourier_activation,
-        dropout,
-        num_heads
     )
-
 
 dataset = CoronagraphDataModule(1)
 
 def objective(trial):
-    model = DeluxeFourierModel(*define_hyp(trial))
+    model = SmallUNet(*define_hyp(trial))
 
     trainer = Trainer(
         enable_checkpointing=False,
@@ -50,15 +43,14 @@ def objective(trial):
         precision='bf16',
         limit_train_batches=1/6,
         limit_val_batches=1/4,
-        callbacks=[PyTorchLightningPruningCallback(trial, monitor = 'Validation Overall')]
+        callbacks=[PyTorchLightningPruningCallback(trial, monitor = 'Validation/Overall')]
     )
     trainer.fit(
         model,
         dataset
     )
 
-    return trainer.callback_metrics['Validation Overall'].item()
-
+    return trainer.callback_metrics['Validation/Overall'].item()
 
 if __name__ == '__main__':
     #Reproducibility

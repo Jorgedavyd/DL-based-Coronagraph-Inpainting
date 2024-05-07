@@ -1,8 +1,9 @@
 from lightning.pytorch.cli import LightningCLI
 from .models import DeluxeFourierModel
 from data import CoronagraphDataModule
-## Run
+
 if __name__ == '__main__':    
+
     cli = LightningCLI(
         model_class = DeluxeFourierModel,
         datamodule_class=CoronagraphDataModule,

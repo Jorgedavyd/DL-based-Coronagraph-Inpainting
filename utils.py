@@ -1,8 +1,9 @@
-from typing import Union, Tuple, Callable
+from typing import Iterable, List, Callable, Tuple, Union
 from torch.fft import fftn, ifftn
 import torch.nn.functional as F
 from torch import nn, Tensor
 import torch
+from torchvision.models import vgg19, VGG19_Weights
 
 ## GPU usage
 def get_default_device():
@@ -499,3 +500,26 @@ class ComplexUpsampling(nn.Module):
         self.layer = lambda x: F.interpolate(x, scale_factor=scale_factor, mode=mode)
     def forward(self, x: Tensor) -> Tensor:
         return self.layer(x.real) + 1j * self.layer(x.imag)
+
+class FeatureExtractor(nn.Module):
+    def __init__(self, layers: Iterable = [4, 9, 18]) -> None:
+        super().__init__()
+        self.layers = list(map(str, layers))
+        # Setting vgg19
+        self.model = vgg19(weights=VGG19_Weights.IMAGENET1K_V1)
+        # Freeze gradients
+        for param in self.model.parameters():
+            param.requires_grad = False
+        # Setting the transformation
+        self.transform = VGG19_Weights.IMAGENET1K_V1.transforms(antialias=True)
+
+    def forward(self, input: Tensor) -> List[Tensor]:
+        x = self.transform(torch.cat((input, input, input), -3))
+        features = []
+        for name, layer in self.model.features.named_children():
+            x = layer(x)
+            if name in self.layers:
+                features.append(x)
+                if name == str(18):
+                    break
+        return features

@@ -4,8 +4,6 @@ from torch import Tensor, nn
 import torch.nn.functional as F
 from . import pytorch_ssim
 
-
-
 class Loss(nn.Module):
     def __init__(self, alpha: Iterable = [0.1, 0.1, 0.1, 0.1, 0.1, 0.1]) -> None:
         self.ssim_loss = pytorch_ssim.SSIM()
