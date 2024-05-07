@@ -30,14 +30,14 @@ $$
 
 3. **Multi-layered Fourier Space Based Partial Convolution Network**: Designed a Partial Convolution UNet like network that analyses both linear spaces to extract features. 
 
-1 and 3 are trained in a **Teacher Forcing** fashion, as the default training method for recursive architectures. Also, they have Cross Multihead Attention in the channel dimention between: $$Re[\mathcal{F}[X]], Im[\mathcal{F}[X]] and X spaces. X being the image space.$$ The skip connection of 3 is by a convolution operation between the output of encoder layers ($$\mathcal{F}[X]$$) and the new Fourier spaces on the decoder.
+1 and 3 are trained in a **Teacher Forcing** fashion, as the default training method for recursive architectures. Also, they have Cross Multihead Attention in the channel dimention between: $Re[\mathcal{F}[X]], Im[\mathcal{F}[X]]$ and $X$ spaces. X being the image space. The skip connection of 3 is by a convolution operation between the output of encoder layers ($\mathcal{F}[X]$) and the new Fourier spaces on the decoder.
 
 ## Convolution theorem
 There is a lot of relations between the Fourier Space and Convolutions:
 
-$$r(x) = { u * v}(x) = \mathcal{F}^{-1}[U \odot V]$$
+$$r(x) = [u * v](x) = \mathcal{F}^{-1}[U \odot V]$$
 
-Given that $$ U, V$$ are both the Fourier space representations of $$u, v$$.
+Given that $ U, V $ are both the Fourier space representations of $u, v$.
 
 ## Instalation
 
