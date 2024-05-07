@@ -1,13 +1,12 @@
 from typing import Tuple, Callable, Iterable, List
-from ..utils import PartialConv2d, ChannelWiseSelfAttention, _FourierConv
+from utils import PartialConv2d, ChannelWiseSelfAttention, _FourierConv
 from torch import Tensor, nn
 from collections import defaultdict
 import torch.nn.functional as F
 import torch
 from lightning import LightningModule
+from .loss import Loss
 
-from loss import Loss
-from utils import ChannelWiseSelfAttention
 
 class SingleFourierBlock(nn.Module):
     def __init__(
@@ -214,6 +213,7 @@ class DeluxeFourierModel(LightningModule):
         
         return loss
     
+    @torch.no_grad()
     def validation_step(self, batch: Tensor) -> Tuple[Tensor, Tensor]:
         I_gt, mask_in = batch
         I_out, mask_out = self(I_gt, mask_in)

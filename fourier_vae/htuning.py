@@ -1,8 +1,11 @@
-from models import DeluxeFourierModel
-import optuna
-from lightning import Trainer
+# Model and data module
+from .models import FourierVAE
 from data import CoronagraphDataModule
+
+# Utils for script automation
+import optuna
 from optuna_integration import PyTorchLightningPruningCallback
+from lightning import Trainer
 import argparse
 import torch
 
@@ -12,36 +15,43 @@ def define_hyp(trial: optuna.trial.Trial):
     decoder_lr = trial.suggest_loguniform('decoder_lr', 1e-8, 1e-2)
     decoder_wd = trial.suggest_loguniform('decoder_wd', 1e-8, 1e-3)
     layers = trial.suggest_int('layers', 1, 2)
-    alpha_1 = trial.suggest_float('alpha_1', 1e-4, 120)
-    alpha_2 = trial.suggest_float('alpha_2', 1e-4, 120)
-    alpha_3 = trial.suggest_float('alpha_3', 1e-4, 120)
-    alpha_4 = trial.suggest_float('alpha_4', 1e-4, 120)
-    alpha_5 = trial.suggest_float('alpha_5', 1e-4, 120)
-    alpha_6 = trial.suggest_float('alpha_6', 1e-4, 120)
-    normal_activation = trial.suggest_categorical('normal_activation', ['relu', 'sigmoid', 'swiglu', 'silu'])
-    fourier_activation = trial.suggest_categorical('normal_activation', ['relu', 'sigmoid', 'swiglu', 'silu'])
+    alpha_1 = trial.suggest_float('alpha_1', 1e-4, 5)
+    alpha_2 = trial.suggest_float('alpha_2', 1e-4, 5)
+    alpha_3 = trial.suggest_float('alpha_3', 1e-4, 5)
+    alpha_4 = trial.suggest_float('alpha_4', 1e-4, 5)
+    alpha_5 = trial.suggest_float('alpha_5', 1e-4, 5)
+    alpha_6 = trial.suggest_float('alpha_6', 1e-4, 5)
+    normal_activation = trial.suggest_categorical('normal_activation', ['relu', 'sigmoid', 'swiglu', 'silu', 'relu6'])
+    fourier_activation = trial.suggest_categorical('normal_activation', ['relu', 'sigmoid', 'swiglu', 'silu', 'relu6'])
     dropout = trial.suggest_float('dropout', 0.1, 0.3)
     optimizer = trial.suggest_categorical('optimizer', [torch.optim.Adam, torch.optim.RMSprop, torch.optim.SGD])
     num_heads = trial.suggest_int('number of heads', 2, 12)
-    return (
-        encoder_lr,
-        encoder_wd,
-        decoder_lr,
-        decoder_wd,
-        optimizer,
-        layers,
-        [alpha_1, alpha_2, alpha_3, alpha_4, alpha_5, alpha_6],
-        normal_activation,
-        fourier_activation,
-        dropout,
-        num_heads
-    )
+    batch_norm = trial.suggest_categorical('batch_norm', [True, False])
+    if batch_norm:
+        eps = trial.suggest_loguniform('eps', 1e-5, 1e-3)
+        momentum = trial.suggest_loguniform('batch_momentum', 1e-1, 5e-1)
+    return {
+        'encoder_lr': encoder_lr,
+        'encoder_wd': encoder_wd,
+        'decoder_lr': decoder_lr,
+        'decoder_wd': decoder_wd,
+        'optimizer': optimizer,
+        'alpha': [alpha_1, alpha_2, alpha_3, alpha_4, alpha_5, alpha_6],
+        'normal_activation': normal_activation,
+        'fourier_activation': fourier_activation,
+        'dropout': dropout,
+        'num_heads': num_heads,
+        'layers': layers,
+        'batch_norm': batch_norm,
+        'eps': None if not batch_norm else eps,
+        'momentum': None if not batch_norm else momentum,
+    }
 
-
+# Batch size of 1
 dataset = CoronagraphDataModule(1)
 
 def objective(trial):
-    model = DeluxeFourierModel(*define_hyp(trial))
+    model = FourierVAE(define_hyp(trial))
 
     trainer = Trainer(
         enable_checkpointing=False,

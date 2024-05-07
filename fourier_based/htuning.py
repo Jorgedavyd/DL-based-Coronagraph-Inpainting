@@ -1,10 +1,9 @@
-from models import FourierPartial
+from models import DeluxeFourierModel
 import optuna
 from lightning import Trainer
 from data import CoronagraphDataModule
 from optuna_integration import PyTorchLightningPruningCallback
 import argparse
-import random
 import torch
 
 def define_hyp(trial: optuna.trial.Trial):
@@ -42,7 +41,7 @@ def define_hyp(trial: optuna.trial.Trial):
 dataset = CoronagraphDataModule(1)
 
 def objective(trial):
-    model = FourierPartial(*define_hyp(trial))
+    model = DeluxeFourierModel(*define_hyp(trial))
 
     trainer = Trainer(
         enable_checkpointing=False,
@@ -58,7 +57,7 @@ def objective(trial):
         dataset
     )
 
-    return trainer.callback_metrics['val_loss'].item()
+    return trainer.callback_metrics['Validation Overall'].item()
 
 
 if __name__ == '__main__':

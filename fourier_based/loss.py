@@ -6,6 +6,12 @@ from torchvision.models import vgg19, VGG19_Weights
 import torch.nn.functional as F
 from joint_fourier import pytorch_ssim
 
+def total_variation_loss(image):
+    # shift one pixel and get difference (for both x and y direction)
+    loss = torch.mean(torch.abs(image[:, :, :, :-1] - image[:, :, :, 1:])) + torch.mean(
+        torch.abs(image[:, :, :-1, :] - image[:, :, 1:, :])
+    )
+    return loss
 
 class FeatureExtractor(nn.Module):
     def __init__(self, layers: Iterable = [4, 9, 18]) -> None:
