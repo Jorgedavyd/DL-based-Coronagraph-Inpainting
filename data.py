@@ -83,7 +83,10 @@ class NormalizeInverse(tt.Normalize):
     def __call__(self, tensor):
         return super().__call__(tensor.clone())
 
+
 import lightning as L
+
+
 class CoronagraphDataset(Dataset):
     def __init__(self, tool: str):
         self.tool = tool
@@ -118,36 +121,59 @@ class CoronagraphDataset(Dataset):
 
         return img.type(torch.float32), mask
 
+
 from torch.utils.data import random_split
 from torch.utils.data import DataLoader
+
 
 class CoronagraphDataModule(L.LightningDataModule):
     def __init__(self, batch_size: int = 1):
         super().__init__()
         self.batch_size = batch_size
 
-    def setup(self, stage = None):
+    def setup(self, stage=None):
         dataset = CoronagraphDataset(tool="c3")
         # 0.8 - 0.1 - 0.1
-        train_len = round(0.8*len(dataset))
+        train_len = round(0.8 * len(dataset))
         other_len = len(dataset) - train_len
-        val_len = other_len//2
+        val_len = other_len // 2
         test_len = other_len - val_len
-        #random split
-        train_ds, val_ds, test_ds = random_split(dataset, [train_len, val_len, test_len])
-        
+        # random split
+        train_ds, val_ds, test_ds = random_split(
+            dataset, [train_len, val_len, test_len]
+        )
+
         self.train_ds = train_ds
         self.val_ds = val_ds
         self.test_ds = test_ds
 
     def train_dataloader(self):
-        return DataLoader(self.train_ds, batch_size=self.batch_size, shuffle=True, num_workers=12, pin_memory=True)
+        return DataLoader(
+            self.train_ds,
+            batch_size=self.batch_size,
+            shuffle=True,
+            num_workers=12,
+            pin_memory=True,
+        )
 
     def val_dataloader(self):
-        return DataLoader(self.val_ds, batch_size=self.batch_size, shuffle=False, num_workers=12, pin_memory=True)
+        return DataLoader(
+            self.val_ds,
+            batch_size=self.batch_size,
+            shuffle=False,
+            num_workers=12,
+            pin_memory=True,
+        )
 
     def test_dataloader(self):
-        return DataLoader(self.test_ds, batch_size=self.batch_size, shuffle=False, num_workers=12, pin_memory=True)
+        return DataLoader(
+            self.test_ds,
+            batch_size=self.batch_size,
+            shuffle=False,
+            num_workers=12,
+            pin_memory=True,
+        )
+
 
 class CrossDataset(CoronagraphDataset):
     def __init__(self, tool):

@@ -4,6 +4,7 @@ import torch
 from torch import Tensor
 from ..utils import FeatureExtractor
 
+
 class NewInpaintingLoss(nn.Module):
     """
     # Inpainting Loss
@@ -114,9 +115,10 @@ class NewInpaintingLoss(nn.Module):
             / self.F_p
         ).sum()
 
-        L_tv = self.alpha[5] * (torch.mean(
-            torch.abs(I_out[:, :, :, :-1] - I_out[:, :, :, 1:])
-        ) + torch.mean(torch.abs(I_out[:, :, :-1, :] - I_out[:, :, 1:, :])))
+        L_tv = self.alpha[5] * (
+            torch.mean(torch.abs(I_out[:, :, :, :-1] - I_out[:, :, :, 1:]))
+            + torch.mean(torch.abs(I_out[:, :, :-1, :] - I_out[:, :, 1:, :]))
+        )
 
         return (
             L_pixel,
@@ -125,6 +127,7 @@ class NewInpaintingLoss(nn.Module):
             L_tv,
             L_pixel + L_perceptual + L_style + L_tv,
         )
+
 
 class OldInpaintingLoss(nn.Module):
     def __init__(self, alpha: Iterable = [4, 6, 4, 0.05, 110, 120, 110]) -> None:
@@ -223,6 +226,3 @@ class OldInpaintingLoss(nn.Module):
         # Total variance loss
 
         return L_pixel, L_perceptual, L_style, L_pixel + L_perceptual + L_style
-
-
-        

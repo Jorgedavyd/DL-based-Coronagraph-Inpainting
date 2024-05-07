@@ -2,21 +2,20 @@ from lightning.pytorch.cli import LightningCLI
 from .models import DeluxeFourierModel
 from data import CoronagraphDataModule
 
-if __name__ == '__main__':    
+if __name__ == "__main__":
 
     cli = LightningCLI(
-        model_class = DeluxeFourierModel,
+        model_class=DeluxeFourierModel,
         datamodule_class=CoronagraphDataModule,
         seed_everything_default=42,
         trainer_defaults={
-            'max_epochs': 200,
-            'accelerator': 'gpu',
+            "max_epochs": 200,
+            "accelerator": "gpu",
         },
-        
     )
 
     model = DeluxeFourierModel(
-		cli.model.encoder_lr,
+        cli.model.encoder_lr,
         cli.model.encoder_wd,
         cli.model.decoder_lr,
         cli.model.decoder_wd,
@@ -26,6 +25,5 @@ if __name__ == '__main__':
         cli.model.normal_activation,
         cli.model.fourier_activation,
         cli.model.dropout,
-        cli.model.num_heads
-
-	)
+        cli.model.num_heads,
+    )

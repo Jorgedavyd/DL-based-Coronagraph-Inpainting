@@ -5,14 +5,17 @@ from torch import nn, Tensor
 import torch
 from torchvision.models import vgg19, VGG19_Weights
 
+
 ## GPU usage
 def get_default_device():
     return torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
+
 
 def to_device(data, device):
     if isinstance(data, (list, tuple)):
         return [to_device(x, device) for x in data]
     return data.to(device, non_blocking=True)
+
 
 class DeviceDataLoader:
     def __init__(self, dl, device):
@@ -25,6 +28,7 @@ class DeviceDataLoader:
 
     def __len__(self):
         return len(self.dl)
+
 
 class PartialConv2d(nn.Conv2d):
     def __init__(self, *args, **kwargs):
@@ -97,6 +101,7 @@ class FourierPartialConv2d(PartialConv2d):
         out, mask = super(FourierPartialConv2d, self).forward(input, mask_in)
         return out + out_fft, mask
 
+
 class FourierMultiheadAttention(nn.Module):
     def __init__(self, d_model, n_heads) -> None:
         super().__init__()
@@ -113,6 +118,7 @@ class FourierMultiheadAttention(nn.Module):
             fft_x.real.view(b, c, -1), fft_x.imag.view(b, c, -1), x
         )
         return (out + out_fft).view(b, c, h, w)
+
 
 class ChannelWiseSelfAttention(nn.Module):
     def __init__(
@@ -169,6 +175,7 @@ class ChannelWiseSelfAttention(nn.Module):
             is_causal,
         )
         return out.transpose(-1, -2)
+
 
 class FourierLayerConv2d(nn.Conv2d):
     def __init__(
@@ -286,19 +293,19 @@ class FourierLayerConv2d(nn.Conv2d):
     ) -> Union[Tuple[Tensor, Tensor], Tensor]:
         return self._part_conv_forward(input, mask_in)
 
-def fourier_conv2d(x: Tensor, weights: Tensor, bias = None) -> Tensor:
-    
+
+def fourier_conv2d(x: Tensor, weights: Tensor, bias=None) -> Tensor:
+
     if bias is not None:
         return (
             x.real * weights.real
             + bias.real.view(1, -1, 1, 1)
             + 1j * (x.imag * weights.imag + bias.imag.view(1, -1, 1, 1))
         )
-    
-    return (
-        x.real * weights.real + 1j * (x.imag * weights.imag)
-    )
-    
+
+    return x.real * weights.real + 1j * (x.imag * weights.imag)
+
+
 class _FourierConv(nn.Module):
     def __init__(
         self,
@@ -316,37 +323,27 @@ class _FourierConv(nn.Module):
                     width,
                     requires_grad=True,
                 )
-                + 1j
-                * torch.zeros(
-                    in_channels, requires_grad=True
-                ),
+                + 1j * torch.zeros(in_channels, requires_grad=True),
                 True,
             )
         )
         if bias:
             self.bias = nn.Parameter(
                 torch.zeros(in_channels, requires_grad=True)
-                + 1j
-                * torch.zeros(
-                    in_channels, requires_grad=True
-                ),
+                + 1j * torch.zeros(in_channels, requires_grad=True),
                 True,
             )
         else:
             self.bias = nn.Parameter(
-                torch.zeros(
-                    in_channels, requires_grad=False
-                )
-                + 1j
-                * torch.zeros(
-                    in_channels, requires_grad=False
-                ),
+                torch.zeros(in_channels, requires_grad=False)
+                + 1j * torch.zeros(in_channels, requires_grad=False),
                 False,
             )
 
     def forward(self, x: Tensor):
         out: Tensor = fourier_conv2d(x, self.weight, self.bias)
         return out
+
 
 class FourierConv2d(_FourierConv):
     """
@@ -368,6 +365,7 @@ class FourierConv2d(_FourierConv):
         out = super(FourierConv2d, self).forward(out)
         out = self.ifft(out, dim=(-2, -1))
         return out
+
 
 class ResidualFourierConvTranspose2d(nn.ConvTranspose2d):
     def __init__(
@@ -433,73 +431,97 @@ class ResidualFourierConvTranspose2d(nn.ConvTranspose2d):
 
         return self.ifft(out).real
 
+
 class ComplexBatchNorm(nn.Module):
     def __init__(self, num_features, eps, momentum) -> None:
         super().__init__()
-        self.Re_layer = nn.BatchNorm2d(
-            num_features,
-            eps,
-            momentum
-        )
-        
+        self.Re_layer = nn.BatchNorm2d(num_features, eps, momentum)
+
         self.Im_layer = nn.BatchNorm2d(
             num_features,
             eps,
             momentum,
         )
-    
+
     def forward(self, x: Tensor) -> Tensor:
         return self.Re_layer(x.real) + 1j * self.Im_layer(x.imag)
+
 
 class ComplexActivationBase(nn.Module):
     def __init__(self, activation: Callable[[Tensor], Tensor]) -> None:
         super().__init__()
         self.activation = activation
+
     def forward(self, x: Tensor) -> Tensor:
         return self.activation(x.real) + 1j * self.activation(x.imag)
+
 
 class ComplexSwiGLU(ComplexActivationBase):
     def __init__(self):
         super().__init__(lambda x: F.hardswish(x) * F.glu(x))
+
     def forward(self, x: Tensor) -> Tensor:
         return super().forward(x)
-        
+
+
 class ComplexReLU(ComplexActivationBase):
     def __init__(self):
         super().__init__(lambda x: F.relu(x))
+
     def forward(self, x: Tensor) -> Tensor:
         return super().forward(x)
+
 
 class ComplexReLU6(ComplexActivationBase):
     def __init__(self):
         super().__init__(lambda x: F.relu6(x))
+
     def forward(self, x: Tensor) -> Tensor:
         return super().forward(x)
+
 
 class ComplexSiLU(ComplexActivationBase):
     def __init__(self):
         super().__init__(lambda x: F.silu(x))
+
     def forward(self, x: Tensor) -> Tensor:
         return super().forward(x)
-    
+
+
 class ComplexSigmoid(ComplexActivationBase):
     def __init__(self):
         super().__init__(lambda x: F.sigmoid(x))
+
     def forward(self, x: Tensor) -> Tensor:
         return super().forward(x)
-    
+
+
 class ComplexMaxPool2d(nn.MaxPool2d):
-    def __init__(self, kernel_size: int | Tuple[int], stride: int | Tuple[int] | None = None, padding: int | Tuple[int] = 0, dilation: int | Tuple[int] = 1, return_indices: bool = False, ceil_mode: bool = False) -> None:
-        super().__init__(kernel_size, stride, padding, dilation, return_indices, ceil_mode)
+    def __init__(
+        self,
+        kernel_size: int | Tuple[int],
+        stride: int | Tuple[int] | None = None,
+        padding: int | Tuple[int] = 0,
+        dilation: int | Tuple[int] = 1,
+        return_indices: bool = False,
+        ceil_mode: bool = False,
+    ) -> None:
+        super().__init__(
+            kernel_size, stride, padding, dilation, return_indices, ceil_mode
+        )
+
     def forward(self, x: Tensor) -> Tensor:
         return super().forward(x.real) + 1j * super().forward(x.imag)
-    
+
+
 class ComplexUpsampling(nn.Module):
-    def __init__(self, scale_factor: int = 2, mode = 'nearest') -> None:
+    def __init__(self, scale_factor: int = 2, mode="nearest") -> None:
         super().__init__()
         self.layer = lambda x: F.interpolate(x, scale_factor=scale_factor, mode=mode)
+
     def forward(self, x: Tensor) -> Tensor:
         return self.layer(x.real) + 1j * self.layer(x.imag)
+
 
 class FeatureExtractor(nn.Module):
     def __init__(self, layers: Iterable = [4, 9, 18]) -> None:

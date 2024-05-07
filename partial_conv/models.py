@@ -12,10 +12,11 @@ from lightning import LightningModule
 from torchmetrics.image import PeakSignalNoiseRatio, StructuralSimilarityIndexMeasure
 from collections import defaultdict
 
+
 class InpaintingBase(LightningModule):
 
-    peak_signal = PeakSignalNoiseRatio().to('cuda')
-    ssim = StructuralSimilarityIndexMeasure().to('cuda')
+    peak_signal = PeakSignalNoiseRatio().to("cuda")
+    ssim = StructuralSimilarityIndexMeasure().to("cuda")
 
     def training_step(self, batch) -> Tensor:
         x, mask_in = batch
@@ -23,16 +24,12 @@ class InpaintingBase(LightningModule):
 
         args = self.criterion(y, x, mask_in, mask_out)
 
-        self.log_dict(
-            {
-                k:v for k,v in zip(self.criterion.labels, args)
-            }
-        )
+        self.log_dict({k: v for k, v in zip(self.criterion.labels, args)})
 
         return args[-1]
-    
+
     def validation_step(self, batch, batch_idx) -> Tensor:
-        x, mask_in = batch 
+        x, mask_in = batch
         y, mask_out = self(x, mask_in)
 
         args = self.criterion(y, x, mask_in, mask_out)
@@ -40,11 +37,11 @@ class InpaintingBase(LightningModule):
         peak_signal = self.peak_signal(y, x)
         ssim = self.ssim(y, x)
 
-        self.log_dict({
-            "val_loss": args[-1],
-            "val_peak_signal": peak_signal,
-            "val_ssim": ssim
-        }, prog_bar = True)
+        self.log_dict(
+            {"val_loss": args[-1], "val_peak_signal": peak_signal, "val_ssim": ssim},
+            prog_bar=True,
+        )
+
 
 class SingleLayer(LightningModule):
 
@@ -71,6 +68,7 @@ class SingleLayer(LightningModule):
         out = self.act(out)
         out, mask = self.conv_4(out, mask)
         return out * ~mask_in.bool() + input * mask_in, mask
+
 
 class UNetArchitecture(LightningModule):
     def __init__(self, criterion) -> None:
@@ -193,10 +191,10 @@ class UNetArchitecture(LightningModule):
         # Computing the loss
         args = self.criterion(pred, img, mask)
         # Defining the metrics that will be wrote
-        metrics = {k:v for k,v in zip(self.criterion.labels, args)}
-        
+        metrics = {k: v for k, v in zip(self.criterion.labels, args)}
+
         self.log_dict(metrics)
-        
+
         return args[-1]
 
     @torch.no_grad()
@@ -206,11 +204,12 @@ class UNetArchitecture(LightningModule):
         # Computing the loss
         args = self.criterion(pred, img, mask)
         # Defining the metrics that will be wrote
-        metrics = {k:v for k,v in zip(self.criterion.labels, args)}
-        
+        metrics = {k: v for k, v in zip(self.criterion.labels, args)}
+
         self.log_dict(metrics)
-        
+
         return args[-1]
+
 
 class UNetArchitectureDeluxe(LightningModule):
     def __init__(self, criterion):
@@ -454,11 +453,12 @@ class UNetArchitectureDeluxe(LightningModule):
 
         args = self.criterion(I_out, I_gt, M_l_1, M_l_2)
 
-        metrics = {k:v for k, v in zip(self.criterion.labels, args)}
+        metrics = {k: v for k, v in zip(self.criterion.labels, args)}
 
         self.log_dict(metrics)
 
         return args[-1]
+
     def imshow(self, train_loader):
         for batch in train_loader:
             I_gt, M_l_1 = batch
@@ -510,15 +510,13 @@ class UNetArchitectureDeluxe(LightningModule):
             plt.show()
             break
 
+
 class SmallUNet(LightningModule):
-    def __init__(
-            self,
-            hparams: Dict[str, any]
-    ) -> None:
+    def __init__(self, hparams: Dict[str, any]) -> None:
         super().__init__()
         self.save_hyperparameters()
 
-        for k,v in hparams.items():
+        for k, v in hparams.items():
             setattr(self, k, v)
 
         self.criterion = NewInpaintingLoss(self.alpha)
@@ -717,19 +715,20 @@ class SmallUNet(LightningModule):
             I_out, mask_out = self._single_forward(I_gt, mask_in, layer)
             args = self.criterion(I_out, I_gt, mask_in, mask_out)
             loss += args[-1]
-            metrics = {f'Training/Layer_{layer}_{k}':v for k,v in zip(self.criterion.labels, args)}
+            metrics = {
+                f"Training/Layer_{layer}_{k}": v
+                for k, v in zip(self.criterion.labels, args)
+            }
             self.log_dict(metrics, prog_bar=True)
             mask_in = mask_out
-        
+
         return loss
-    
-    def validation_step(self, batch:Tensor) -> Tensor:
+
+    def validation_step(self, batch: Tensor) -> Tensor:
         I_gt, mask_in = batch
         I_out, mask_out = self(I_gt, mask_in)
         args = self.criterion(I_out, I_gt, mask_in, mask_out)
-        metrics = {
-            f'Validation/{k}':v for k,v in zip(self.criterion.labels, args)
-        }
+        metrics = {f"Validation/{k}": v for k, v in zip(self.criterion.labels, args)}
         self.log_dict(metrics)
 
     def configure_optimizers(self):
@@ -737,17 +736,28 @@ class SmallUNet(LightningModule):
         decoder_param_group = defaultdict(list)
 
         for name, param in self.named_parameters():
-            if name.startswith(('conv', 'norm', 'att')):
-                encoder_param_group['params'].append(param)
+            if name.startswith(("conv", "norm", "att")):
+                encoder_param_group["params"].append(param)
             else:
-                decoder_param_group['params'].append(param)
+                decoder_param_group["params"].append(param)
 
-        optimizer = self.optimizer([
-            {'params': encoder_param_group['params'], 'lr': self.encoder_lr, 'weight_decay': self.encoder_wd},
-            {'params': decoder_param_group['params'], 'lr': self.decoder_lr, 'weight_decay': self.decoder_wd}
-        ])
+        optimizer = self.optimizer(
+            [
+                {
+                    "params": encoder_param_group["params"],
+                    "lr": self.encoder_lr,
+                    "weight_decay": self.encoder_wd,
+                },
+                {
+                    "params": decoder_param_group["params"],
+                    "lr": self.decoder_lr,
+                    "weight_decay": self.decoder_wd,
+                },
+            ]
+        )
 
         return optimizer
+
 
 class DefaultResidual(nn.Module):
     def __init__(
