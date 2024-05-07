@@ -35,7 +35,7 @@ $$
 ## Convolution theorem
 There is a lot of relations between the Fourier Space and Convolutions:
 
-$r(x) = \{ u * v \}(x) = \mathcal{F}^{-1}[U \odot V]$
+$r(x) = \\{ u * v \\}(x) = \mathcal{F}^{-1}[U \dot V]$
 
 Given that $U, V$ are both the Fourier space representations of $u, v$.
 
