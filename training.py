@@ -2,6 +2,8 @@ from lightning.pytorch.cli import LightningCLI
 from models import FourierPartial
 from data import CoronagraphDataModule
 import torch
+from lightning import Trainer
+
 ## Run
 if __name__ == '__main__':
     torch.set_float32_matmul_precision('medium')
@@ -10,11 +12,11 @@ if __name__ == '__main__':
         datamodule_class=CoronagraphDataModule,
         seed_everything_default=42,
         trainer_defaults={
-            'max_epochs': 5,
+            'max_epochs': 200,
             'accelerator': 'gpu',
-            'limit_train_batches': 1/5,
-            'check_val_every_n_epoch': 5
-        }
+            'resume_from_checkpoint': 'lightning_logs/version_19/checkpoints/epoch=99-step=65800.ckpt'  
+        },
+        
     )
 
     model = FourierPartial(

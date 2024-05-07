@@ -4,6 +4,8 @@ import torch
 from torch import Tensor
 from torchvision.models import vgg19, VGG19_Weights
 import torch.nn.functional as F
+import pytorch_ssim
+
 
 def total_variation_loss(image):
     # shift one pixel and get difference (for both x and y direction)
@@ -490,3 +492,63 @@ class CoronagraphConstraint(nn.Module):
     def forward(self, pred: Tensor) -> Tensor:
 
         return
+
+
+
+class FourierDeluxeCriterion(nn.Module):
+    def __init__(self, alpha: Iterable = [0.1, 0.1, 0.1, 0.1, 0.1, 0.1]) -> None:
+        self.ssim_loss = pytorch_ssim.SSIM()
+        self.l1_loss = F.l1_loss
+        self.labels = ['L1 Inner Loss', 'L1 XOR Loss', 'PSNR Inner Loss', 'PSNR XOR Loss', 'SSIM Inner Loss', 'SSIM XOR Loss', 'Overall']
+        self.alpha = alpha
+        self.factors = {k:v for k, v in zip(self.labels[:-1], self.alpha)}
+
+    def forward(self, I_out, I_gt, mask_in, mask_out) -> Tuple[Tensor, ...]:
+        # Getting the batch_size (b), number of channels (c), heigh (h) and width (w)
+        b, c, h, w = I_out.shape
+        # N_{I_{gt}} = C \times H \times W
+        N_I_gt: float = c * h * w
+        # for diff terms of the loss function
+        mathcal_M: Tensor = mask_in.bool() ^ mask_out.bool()
+
+        I_out_masked_inner = ~mask_out.bool() * I_out
+        I_out_masked_diff = mathcal_M * I_out
+
+        I_gt_masked_inner = ~mask_out.bool() * I_gt
+        I_gt_masked_diff = mathcal_M * I_gt
+
+        L_pixel_inner: Tensor = (1 / N_I_gt) * self.alpha[0] * self.l1_loss(I_out_masked_inner, I_gt_masked_inner)
+
+        L_pixel_diff: Tensor = (1 / N_I_gt) * self.alpha[1] * self.l1_loss(I_out_masked_diff, I_gt_masked_diff)
+        
+        L_psnr_inner = self.alpha[2] * 20 * torch.log10(torch.sqrt(F.mse_loss(I_out_masked_inner, I_gt_masked_inner)))
+        
+        L_psnr_diff = self.alpha[3] * 20 * torch.log10(torch.sqrt(F.mse_loss(I_out_masked_diff, I_gt_masked_diff)))
+
+        L_ssim_inner = self.alpha[4] * (- self.ssim_loss(I_out_masked_inner, I_gt_masked_inner))
+            
+        L_ssim_diff = self.alpha[5] (- self.ssim_loss(I_out_masked_diff, I_gt_masked_diff))
+
+        return (
+            L_pixel_inner,
+            L_pixel_diff,
+            L_psnr_inner,
+            L_psnr_diff,
+            L_ssim_inner,
+            L_ssim_diff,
+            L_pixel_inner + L_pixel_diff + L_psnr_inner + L_psnr_diff + L_ssim_inner + L_ssim_diff
+        )
+    
+    class PSNR:
+        """Peak Signal to Noise Ratio
+        img1 and img2 have range [0, 255]"""
+
+        def __init__(self):
+            self.name = "PSNR"
+
+        @staticmethod
+        def __call__(img1, img2):
+            mse = torch.mean((img1 - img2) ** 2)
+            return 20 * torch.log10(255.0 / torch.sqrt(mse))
+
+        

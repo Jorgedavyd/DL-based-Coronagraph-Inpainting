@@ -4,7 +4,6 @@ from lightning import Trainer
 from data import CoronagraphDataModule
 from optuna_integration import PyTorchLightningPruningCallback
 import argparse
-import random
 import torch
 
 def define_hyp(trial: optuna.trial.Trial):
@@ -58,7 +57,7 @@ def objective(trial):
         dataset
     )
 
-    return trainer.callback_metrics['val_loss'].item()
+    return trainer.callback_metrics['Validation Overall'].item()
 
 
 if __name__ == '__main__':

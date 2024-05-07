@@ -153,6 +153,7 @@ class ChannelWiseSelfAttention(nn.MultiheadAttention):
         average_attn_weights: bool = True,
         is_causal: bool = False,
     ) -> Tuple[Tensor | None]:
+        out_shape = value.shape
         query = query.transpose(-1, -2)
         key = key.transpose(-1, -2)
         value = value.transpose(-1, -2)
@@ -298,8 +299,6 @@ class _FourierConv(nn.Module):
         height: Tensor,
         width: Tensor,
         bias: bool = True,
-        device="cpu",
-        dtype=torch.float32,
     ) -> None:
         super(_FourierConv, self).__init__()
         self.weight = nn.init.kaiming_uniform_(
@@ -308,34 +307,32 @@ class _FourierConv(nn.Module):
                     in_channels,
                     height,
                     width,
-                    dtype=dtype,
-                    device=device,
                     requires_grad=True,
                 )
                 + 1j
                 * torch.zeros(
-                    in_channels, dtype=dtype, device=device, requires_grad=True
+                    in_channels, requires_grad=True
                 ),
                 True,
             )
         )
         if bias:
             self.bias = nn.Parameter(
-                torch.zeros(in_channels, dtype=dtype, device=device, requires_grad=True)
+                torch.zeros(in_channels, requires_grad=True)
                 + 1j
                 * torch.zeros(
-                    in_channels, dtype=dtype, device=device, requires_grad=True
+                    in_channels, requires_grad=True
                 ),
                 True,
             )
         else:
             self.bias = nn.Parameter(
                 torch.zeros(
-                    in_channels, dtype=dtype, device=device, requires_grad=False
+                    in_channels, requires_grad=False
                 )
                 + 1j
                 * torch.zeros(
-                    in_channels, dtype=dtype, device=device, requires_grad=False
+                    in_channels, requires_grad=False
                 ),
                 False,
             )
