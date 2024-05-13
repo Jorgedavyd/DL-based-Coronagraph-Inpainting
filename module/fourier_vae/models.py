@@ -6,10 +6,10 @@ from collections import defaultdict
 from torch.fft import fftn, ifftn
 import torch.nn.functional as F
 import torch
-from lightning import LightningModule
+from lightning.pytorch import LightningModule
 
 # Module utils
-from .loss import Loss
+from .loss import Loss, SecondLoss
 from ..utils import fourier_conv2d
 from ..utils import (
     ComplexBatchNorm,
@@ -146,8 +146,16 @@ class FourierVAE(LightningModule):
         for k, v in hparams.items():
             setattr(self, k, v)
 
+        match self.optimizer:
+            case 'adam':
+                self.optimizer = torch.optim.Adam
+            case 'rms':
+                self.optimizer = torch.optim.RMSprop
+            case 'sgd':
+                self.optimizer = torch.optim.SGD
+                
         # Setting defaults
-        self.criterion = Loss(self.alpha)
+        self.criterion = SecondLoss(self.alpha)
 
         self.save_hyperparameters()
 
@@ -362,7 +370,7 @@ class FourierVAE(LightningModule):
     def training_step(self, batch: Tensor) -> Tensor:
         I_gt, mask_in = batch
         I_out, mu, logvar = self(I_gt, mask_in)
-        args = self.criterion(I_out, I_gt, mask_in, mu, logvar)
+        args = self.criterion(I_out, I_gt, mu, logvar)
         loss = args[-1]
         metrics = {f"Training/{k}": v for k, v in zip(self.criterion.labels, args)}
         self.log_dict(metrics, prog_bar=True)
@@ -371,10 +379,11 @@ class FourierVAE(LightningModule):
     def validation_step(self, batch: Tensor, idx) -> Tensor:
         I_gt, mask_in = batch
         I_out, mu, logvar = self(I_gt, mask_in)
-        args = self.criterion(I_out, I_gt, mask_in, mu, logvar)
+        args = self.criterion(I_out, I_gt, mu, logvar)
         self.log_dict(
             {f"Validation/{k}": v for k, v in zip(self.criterion.labels, args)}
         )
+        self.log('hp_metric', Tensor([loss/factor for loss, factor in zip(args[:-1], self.criterion.alpha)]).sum().item())
 
     def configure_optimizers(self):
         encoder_param_group = defaultdict(list)

@@ -2,7 +2,7 @@ from typing import Iterable, Tuple
 import torch
 from torch import Tensor, nn
 import torch.nn.functional as F
-from . import pytorch_ssim
+from .. import pytorch_ssim
 
 
 class Loss(nn.Module):

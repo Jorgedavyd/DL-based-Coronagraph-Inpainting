@@ -23,7 +23,7 @@ def define_hyp(trial: optuna.trial.Trial):
         "normal_activation", ["relu", "sigmoid", "silu"]
     )
     fourier_activation = trial.suggest_categorical(
-        "normal_activation", ["relu", "sigmoid", "silu"]
+        "fourier_activation", ["relu", "sigmoid", "silu"]
     )
     dropout = trial.suggest_float("dropout", 0.1, 0.3)
     optimizer = trial.suggest_categorical(

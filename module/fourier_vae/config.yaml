@@ -4,12 +4,18 @@ fit:
     encoder_wd: 0
     decoder_lr: 2e-5
     decoder_wd: 0
-    alpha_1: 6
-    alpha_2: 8
-    alpha_3: 0.05
-    alpha_4: 4
-    alpha_5: 6
-    alpha_6: 0.1
+    optimizer: adam,
+    alpha: 
+      -
+      -
+      -
+      -
+      -
+      -
+    normal_activation: normal_activation,
+    fourier_activation: fourier_activation,
+    eps: eps,
+    momentum: momentum,
   data:
-    batch_size: 1
+    batch_size: 4
   

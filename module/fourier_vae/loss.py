@@ -4,7 +4,7 @@ from typing import Iterable, List, Callable, Tuple
 from torch import Tensor
 import torch.nn.functional as F
 import torch
-
+from .. import pytorch_ssim
 from ..utils import FeatureExtractor
 
 class Loss(nn.Module):
@@ -120,3 +120,59 @@ class Loss(nn.Module):
             L_kl,
             L_pixel + L_perceptual + L_style + L_tv + L_kl,
         )
+    
+class SecondLoss(nn.Module):
+    """
+    # Fourier Variational Autoencoder Loss
+    nn.Module implementation for inpainting training
+    """
+
+    def __init__(self, alpha: Iterable = [4, 6, 0.05, 110, 120]) -> None:
+        super().__init__()
+
+        self.alpha: Iterable = alpha
+
+        self.labels = [
+            "SSIM",
+            "PSNR",
+            "L1",
+            "TV",
+            "KL",
+            "Overall",
+        ]
+
+        self.factors = {
+            "SSIM": alpha[0],
+            "PSNR": alpha[1],
+            "L1": alpha[2],
+            "TV": alpha[3],
+            "KL": alpha[4],
+        }
+
+        self.ssim_loss = pytorch_ssim.SSIM()
+        self.l1_loss = F.l1_loss
+    
+    def forward(self, I_out: Tensor, I_gt: Tensor, mu: Tensor, logvar: Tensor) -> Tuple[Tensor, ...]:
+        # Getting the batch_size (b), number of channels (c), heigh (h) and width (w)
+        b, c, h, w = I_out.shape
+        # N_{I_{gt}} = C \times H \times W
+        N_I_gt: float = c * h * w
+
+        L_ssim = self.alpha[0] * (-self.ssim_loss(I_out, I_gt))
+        
+        L_psnr = (
+            self.alpha[1]
+            * 20
+            * torch.log10(torch.sqrt(F.mse_loss(I_out, I_gt)))
+        )
+
+        L_l1 = self.alpha[2] * self.l1_loss(I_out, I_gt, reduction = 'sum') * (1/N_I_gt)
+
+        L_tv = self.alpha[3] * torch.mean(
+            torch.abs(I_out[:, :, :, :-1] - I_out[:, :, :, 1:])
+        ) + torch.mean(torch.abs(I_out[:, :, :-1, :] - I_out[:, :, 1:, :]))
+
+        # KL divergence
+        L_kl = self.alpha[4] * (-0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp()))
+
+        return L_ssim, L_psnr, L_l1, L_tv, L_kl, L_ssim + L_psnr + L_l1 + L_tv + L_kl
