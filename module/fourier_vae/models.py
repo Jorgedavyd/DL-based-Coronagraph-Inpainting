@@ -140,7 +140,7 @@ class UpsamplingFourierBlock(nn.Module):
 
 
 class FourierVAE(LightningModule):
-    def __init__(self, hparams: Dict[str, any]) -> None:
+    def __init__(self, **hparams) -> None:
         super().__init__()
         # Setting hyperparameters values
         for k, v in hparams.items():
@@ -361,7 +361,7 @@ class FourierVAE(LightningModule):
 
         out = self.fc_act(out)
 
-        return out * ~mask_in.bool() + x * mask_in.bool(), mu, logvar
+        return out, mu, logvar
 
     def forward(self, x: Tensor, mask_in: Tensor) -> Tensor:
         x, mu, logvar = self._single_forward(x, mask_in, 0)

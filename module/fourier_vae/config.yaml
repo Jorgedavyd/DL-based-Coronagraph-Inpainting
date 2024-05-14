@@ -1,21 +1,29 @@
-fit:
-  model:
-    encoder_lr: 1e-5
+trainer:
+  logger: true
+  enable_checkpointing: true
+  max_epochs: 100
+  accelerator: cuda
+  devices:  1
+  precision: bf16-mixed
+
+model:
+  class_path: module.fourier_vae.models.FourierVAE
+  dict_kwargs:
+    encoder_lr: 2e-4
     encoder_wd: 0
-    decoder_lr: 2e-5
+    decoder_lr: 5e-5
     decoder_wd: 0
-    optimizer: adam,
-    alpha: 
-      -
-      -
-      -
-      -
-      -
-      -
-    normal_activation: normal_activation,
-    fourier_activation: fourier_activation,
-    eps: eps,
-    momentum: momentum,
-  data:
-    batch_size: 4
-  
+    alpha:
+      - 0.1
+      - 5
+      - 5
+      - 5
+      - 40
+    normal_activation: relu
+    fourier_activation: relu
+    eps: 0.1
+    momentum: 0.1
+    optimizer: adam
+data:
+  batch_size: 6
+
