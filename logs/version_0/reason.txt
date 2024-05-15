@@ -1,0 +1,1 @@
+Probable vanishing gradient given the fourier activation function, redefining

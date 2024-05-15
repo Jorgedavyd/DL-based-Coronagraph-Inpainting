@@ -1,0 +1,14 @@
+encoder_lr: 0.001
+encoder_wd: 0
+decoder_lr: 0.0001
+decoder_wd: 0
+alpha:
+- 0.011570737437682454
+- 0.001103484695815668
+- 0.013517931366753718
+- 0.01963144615407613
+normal_activation: silu
+fourier_activation: sigmoid
+eps: 0.1
+momentum: 0.1
+optimizer: adam

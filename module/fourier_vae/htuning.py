@@ -25,7 +25,7 @@ def objective(trial: optuna.trial.Trial):
             trial.suggest_float('alpha_4', 0.001, 1, log = True)],
     optimizer = 'adam',
     normal_activation = 'silu',
-    fourier_activation = 'sigmoid',
+    fourier_activation = 'relu',
     eps = 0.1,
     momentum = 0.1
     )

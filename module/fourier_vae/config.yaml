@@ -1,7 +1,7 @@
 trainer:
   logger: true
   enable_checkpointing: true
-  max_epochs: 200
+  max_epochs: 2500
   accelerator: cuda
   devices:  1
   precision: '32'
@@ -24,5 +24,5 @@ model:
     momentum: 0.1
     optimizer: adam
 data:
-  batch_size: 6
+  batch_size: 12
 
