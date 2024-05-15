@@ -22,8 +22,7 @@ def objective(trial: optuna.trial.Trial):
     alpha = [trial.suggest_float('alpha_1', 0.001, 1, log = True),
             trial.suggest_float('alpha_2', 0.001, 1, log = True),
             trial.suggest_float('alpha_3', 0.001, 1, log = True),
-            trial.suggest_float('alpha_4', 0.001, 1, log = True),
-            trial.suggest_float('alpha_5', 0.001, 1, log = True)],
+            trial.suggest_float('alpha_4', 0.001, 1, log = True)],
     optimizer = 'adam',
     normal_activation = 'silu',
     fourier_activation = 'sigmoid',
@@ -41,7 +40,7 @@ def objective(trial: optuna.trial.Trial):
         devices = 1,
         log_every_n_steps=22,
         precision="bf16-mixed",
-        limit_train_batches=1 / 5,
+        limit_train_batches=1 / 4,
         limit_val_batches=1 / 4,
         deterministic=True
     )
@@ -61,7 +60,7 @@ if __name__ == "__main__":
 
     study = optuna.create_study(directions=["maximize","maximize","minimize","minimize"])
 
-    study.optimize(objective, n_trials=10, gc_after_trial=True)
+    study.optimize(objective, n_trials=100, gc_after_trial=True)
 
     print(f"Number of trials on the Pareto front: {len(study.best_trials)}")
 

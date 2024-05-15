@@ -321,8 +321,7 @@ class _FourierConv(nn.Module):
                     height,
                     width,
                     requires_grad=True,
-                )
-                + 1j * torch.zeros(in_channels, height, width, requires_grad=True),
+                ),
                 True,
             )
         )
@@ -338,9 +337,9 @@ class _FourierConv(nn.Module):
                 + 1j * torch.zeros(in_channels, requires_grad=False),
                 False,
             )
-
+        self.fft = fftn
     def forward(self, x: Tensor):
-        out: Tensor = fourier_conv2d(x, self.weight, self.bias)
+        out: Tensor = fourier_conv2d(x, self.fft(self.weight), self.fft(self.bias) if self.bias is not None else self.bias)
         return out
 
 

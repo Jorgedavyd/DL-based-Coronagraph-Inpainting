@@ -130,9 +130,9 @@ class UpsamplingFourierBlock(nn.Module):
             out = self.fourier_activation(out)
         out = self.f_norm(out)
         #Convolution in fourier space with encoder weights
-        out = self.ifft(out)
+        out = self.ifft(out, dim = (-2, -1))
 
-        out = self.fc_norm(n_out + out.real + out.imag)
+        out = self.fc_norm(n_out + out.real)
 
         out, mask_out = self.n_upsampling(out, mask_out)
 
