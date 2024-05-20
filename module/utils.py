@@ -314,7 +314,7 @@ class _FourierConv(nn.Module):
         bias: bool = True,
     ) -> None:
         super(_FourierConv, self).__init__()
-        self.weight = nn.init.kaiming_uniform_(
+        self.weight = fftn(nn.init.kaiming_uniform_(
             nn.Parameter(
                 torch.zeros(
                     in_channels,
@@ -324,22 +324,16 @@ class _FourierConv(nn.Module):
                 ),
                 True,
             )
-        )
+        ), dim = (-2, -1)).to('cuda')
         if bias:
-            self.bias = nn.Parameter(
-                torch.zeros(in_channels, requires_grad=True)
-                + 1j * torch.zeros(in_channels, requires_grad=True),
+            self.bias = fftn(nn.Parameter(
+                torch.zeros(in_channels, requires_grad=True),
                 True,
-            )
+            )).to('cuda')
         else:
-            self.bias = nn.Parameter(
-                torch.zeros(in_channels, requires_grad=False)
-                + 1j * torch.zeros(in_channels, requires_grad=False),
-                False,
-            )
-        self.fft = fftn
+            self.bias = None
     def forward(self, x: Tensor):
-        out: Tensor = fourier_conv2d(x, self.fft(self.weight), self.fft(self.bias) if self.bias is not None else self.bias)
+        out: Tensor = fourier_conv2d(x, self.weight, self.bias)
         return out
 
 
@@ -431,7 +425,7 @@ class ResidualFourierConvTranspose2d(nn.ConvTranspose2d):
 
 
 class ComplexBatchNorm(nn.Module):
-    def __init__(self, num_features, eps, momentum) -> None:
+    def __init__(self, num_features, eps: float = 0.00001, momentum: float = 0.1) -> None:
         super().__init__()
         self.Re_layer = nn.BatchNorm2d(num_features, eps, momentum)
 
@@ -444,6 +438,18 @@ class ComplexBatchNorm(nn.Module):
     def forward(self, x: Tensor) -> Tensor:
         return self.Re_layer(x.real) + 1j * self.Im_layer(x.imag)
 
+class ComplexUpsamplingBilinear2d(nn.Module):
+    def __init__(
+            self,
+            scale_factor: int = 2,
+            mode: str = 'nearest'
+    ) -> None:
+        super().__init__()
+        self.re = lambda x: F.interpolate(x, scale_factor=scale_factor, mode=mode)
+        self.im = lambda x: F.interpolate(x, scale_factor=scale_factor, mode=mode)
+
+    def forward(self, x: Tensor) -> Tensor:
+        return self.re(x.real) + 1j * self.im(x.imag) 
 
 class ComplexActivationBase(nn.Module):
     def __init__(self, activation: Callable[[Tensor], Tensor]) -> None:
