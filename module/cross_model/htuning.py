@@ -8,7 +8,7 @@ from lightning.pytorch import Trainer
 import torch
 from .loss import Loss
 
-ghost_criterion = Loss(0.1)
+ghost_criterion = Loss()
 
 def objective(trial: optuna.trial.Trial):
 

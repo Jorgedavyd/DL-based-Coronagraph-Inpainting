@@ -47,6 +47,16 @@ pip install corkit
 ```
 as part of the `level_1` routines.
 
+## Reproduce
+```bash
+# Htuning
+python3 -m module.<model_type>.htuning >> module/<model_type>/htuning.txt
+
+# Training
+python3 -m training fit -c module/<model_type>/config.yaml >> module/<model_type>/training.txt
+```
+
+
 ## Acknowledgements
 
 This project was inspired by the work of SolarSoft developers and the researchers behind partial convolutional layers, which form the backbone of this application.

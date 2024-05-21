@@ -127,9 +127,11 @@ from torch.utils.data import DataLoader
 
 
 class CoronagraphDataModule(L.LightningDataModule):
-    def __init__(self, batch_size: int = 1):
+    def __init__(self, batch_size: int = 1, num_workers: int = 12, pin_memory: bool = True):
         super().__init__()
         self.batch_size = batch_size
+        self.num_workers = num_workers
+        self.pin_memory = pin_memory
 
     def setup(self, stage=None):
         dataset = CoronagraphDataset(tool="c3")
@@ -152,8 +154,8 @@ class CoronagraphDataModule(L.LightningDataModule):
             self.train_ds,
             batch_size=self.batch_size,
             shuffle=True,
-            num_workers=12,
-            pin_memory=True,
+            num_workers=self.num_workers,
+            pin_memory=self.pin_memory,
         )
 
     def val_dataloader(self):
@@ -161,8 +163,8 @@ class CoronagraphDataModule(L.LightningDataModule):
             self.val_ds,
             batch_size=self.batch_size,
             shuffle=False,
-            num_workers=12,
-            pin_memory=True,
+            num_workers=self.num_workers,
+            pin_memory=self.pin_memory,
         )
 
     def test_dataloader(self):
@@ -170,8 +172,8 @@ class CoronagraphDataModule(L.LightningDataModule):
             self.test_ds,
             batch_size=self.batch_size,
             shuffle=False,
-            num_workers=12,
-            pin_memory=True,
+            num_workers=self.num_workers,
+            pin_memory=self.pin_memory,
         )
 
 

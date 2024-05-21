@@ -5,7 +5,7 @@ trainer:
   accelerator: cuda
   devices:  1
   precision: 32
-
+  
 model:
   class_path: module.cross_model.models.FourierVAE
   dict_kwargs:
@@ -19,8 +19,10 @@ model:
       - 0.003
       - 0.01
     beta: 0.00001
-    activation: relu
+    activation: None
     optimizer: adam
 data:
   batch_size: 12
+  pin_memory: true
+  num_workers: 8
 

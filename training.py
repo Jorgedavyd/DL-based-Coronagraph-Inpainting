@@ -1,5 +1,4 @@
 from lightning.pytorch.cli import LightningCLI
-from lightning.pytorch import seed_everything
 from module.data import CoronagraphDataModule
 import torch
 
@@ -8,8 +7,11 @@ if __name__ == "__main__":
 
     cli = LightningCLI(
         datamodule_class=CoronagraphDataModule,
+        seed_everything_default=123,
         trainer_defaults={
-            'deterministic': True, # Reproducibility
+            'deterministic': True, 
+
         },
     )
+
 

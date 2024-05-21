@@ -2,7 +2,6 @@
 from typing import List
 from torch import Tensor
 from torch import nn
-from collections import defaultdict
 from torch.fft import fftn, ifftn
 import torch
 from lightning.pytorch import LightningModule
@@ -20,6 +19,12 @@ from ..utils import (
     fourier_conv2d,
     ComplexUpsamplingBilinear2d
 )
+
+VALID_OPTIMIZERS = {
+    'adam': torch.optim.Adam,
+    'sgd': torch.optim.SGD,
+    'rms': torch.optim.RMSprop
+}
 
 class SingleFourierBlock(nn.Module):
     def __init__(
@@ -92,9 +97,10 @@ class UpsamplingFourierBlock(nn.Module):
                 self.activation = ComplexSiLU()
             case "sigmoid":
                 self.activation = ComplexSigmoid()
+            case 'None':
+                self.activation = nn.Identity()
             case None:
                 self.activation = nn.Identity()
-        
         # Batch normalization
         self.norm = ComplexBatchNorm(in_channels)
         
@@ -320,7 +326,7 @@ class FourierVAE(LightningModule):
         args = self.criterion(I_out, I_gt, mu, logvar)
         loss = args[-1]
         metrics = {f"Training/{k}": v for k, v in zip(self.criterion.labels, args)}
-        self.log_dict(metrics, prog_bar=True)
+        self.log_dict(metrics, prog_bar=True, on_step=True, on_epoch = True)
         return loss
 
     def validation_step(self, batch: Tensor, idx) -> Tensor:
@@ -333,62 +339,30 @@ class FourierVAE(LightningModule):
         self.log('hp_metric', args[-1])
         
     def configure_optimizers(self):
-        encoder_param_group = defaultdict(list)
-        decoder_param_group = defaultdict(list)
+        encoder_param_group : List[nn.Module] = []
+        decoder_param_group : List[nn.Module] = []
 
-        match self.optimizer:
-            case 'adam':
-                optimizer = torch.optim.Adam
-            case 'rms':
-                optimizer = torch.optim.RMSprop
-            case 'sgd':
-                optimizer = torch.optim.SGD
-
-        match self.scheduler:
-            case 'onecycle':
-                scheduler = torch.optim.lr_scheduler.OneCycleLR
-                interval = 'step'
-                self.scheduler_kwargs.update(
-                    {
-                        'total_steps': self.trainer.
-                    }
-                )
-            case 'plateau':
-                scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau
-                interval = 'epoch'
-            case 'linear':
-                scheduler = torch.optim.lr_scheduler.LinearLR
-                interval = 'epoch'
+        optimizer = VALID_OPTIMIZERS[self.optimizer]
 
         for name, param in self.named_parameters():
             if name.startswith(("block", "encoder")):
-                encoder_param_group["params"].append(param)
+                encoder_param_group.append(param)
             else:
-                decoder_param_group["params"].append(param)
+                decoder_param_group.append(param)
 
         optimizer = optimizer(
             [
                 {
-                    "params": encoder_param_group["params"],
+                    "params": encoder_param_group,
                     "lr": self.encoder_lr,
                     "weight_decay": self.encoder_wd,
                 },
                 {
-                    "params": decoder_param_group["params"],
+                    "params": decoder_param_group,
                     "lr": self.decoder_lr,
                     "weight_decay": self.decoder_wd,
                 },
             ]
         )
 
-        scheduler = scheduler(optimizer, )
-
-        return {
-            'optimizer': optimizer,
-            'lr_scheduler': {
-                'scheduler': scheduler,
-                'monitor': f"Training/{self.criterion.labels[-1]}",
-                'interval': interval,
-                'frequency': 1
-        }
-        }
+        return optimizer

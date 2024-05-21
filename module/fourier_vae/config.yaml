@@ -1,10 +1,11 @@
 trainer:
   logger: true
   enable_checkpointing: true
-  max_epochs: 2500
+  max_epochs: 250
   accelerator: cuda
   devices:  1
   precision: '32'
+  log_every_n_steps: 1
 
 model:
   class_path: module.fourier_vae.models.FourierVAE
@@ -25,4 +26,6 @@ model:
     optimizer: adam
 data:
   batch_size: 6
+  num_workers: 8
+  pin_memory: True
 
